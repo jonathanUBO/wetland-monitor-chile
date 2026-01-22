@@ -82,3 +82,4 @@ Este proyecto implementa índices basados en literatura científica rigorosa:
 ## 📄 Licencia
 
 Este proyecto es de código abierto.
+Rebuild Vercel: 2026-01-22

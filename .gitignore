@@ -1,0 +1,33 @@
+# General
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Python Backend
+**/__pycache__/
+*.py[cod]
+*$py.class
+backend/venv/
+backend/.env
+backend/logs/
+
+# Node Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.env
+frontend/.env.local
+frontend/npm-debug.log*
+
+# Google Earth Engine
+gee-key.json
+
+# Project Specific
+*.docx
+temp/
+scratch/
+brain/
+.gemini/

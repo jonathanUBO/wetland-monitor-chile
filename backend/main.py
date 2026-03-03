@@ -7,6 +7,8 @@ import logging
 import io
 import numpy as np
 import requests
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
@@ -743,26 +745,29 @@ async def analyze(request: AnalysisRequest, authorization: str = Header(None)):
 @app.post("/analyze-all")
 async def analyze_all(request: AnalysisRequest, authorization: str = Header(None)):
     if not authorization: raise HTTPException(401, "Missing Token")
-    token = authorization.split(" ")[1]
     
     try:
+        token = authorization.split(" ")[1]
         from google.oauth2.credentials import Credentials
         creds = Credentials(token)
-        if request.projectId: ee.Initialize(creds, project=request.projectId)
-        else: ee.Initialize(creds)
+        
+        if request.projectId: 
+            ee.Initialize(creds, project=request.projectId)
+        else: 
+            ee.Initialize(creds)
         
         results = {}
         modes = ["Hydrology", "Vegetation", "WaterQuality", "SoilVegetation", "AlgaeBloom", "WaterRatio"]
         
         for m in modes:
-            print(log_process_stage('', m, 'processing'))
+            logger.info(log_process_stage('', m, 'processing'))
             results[m] = perform_single_analysis(request, m)
             
-        print(log_process_stage('', None, 'final'))
+        logger.info(log_process_stage('', None, 'final'))
         return {"status": "success", "data": results}
     except Exception as e:
-        print(f"Error: {e}")
-        raise HTTPException(500, detail=str(e))
+        logger.error(f"Analyze-all Error: {e}")
+        raise HTTPException(500, detail=f"Backend Error: {str(e)}")
 
 @app.post("/generate-report")
 async def generate_report(request: dict):

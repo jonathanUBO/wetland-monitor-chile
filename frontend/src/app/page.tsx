@@ -444,9 +444,10 @@ export default function Dashboard() {
                 setProcessLog(prev => [...prev, "✓  Análisis finalizado exitosamente"]);
             }
         } catch (err: any) {
-            console.error(err);
-            setError("Error en análisis remoto.");
-            setProcessLog(prev => [...prev, "✗  ERROR FATAL"]);
+            console.error("Analysis error:", err);
+            const detail = err.response?.data?.detail || err.message || "Error desconocido";
+            setError(`Error en análisis: ${detail}`);
+            setProcessLog(prev => [...prev, `✗  ERR: ${detail.substring(0, 30)}...`]);
         } finally {
             setLoading(false);
         }

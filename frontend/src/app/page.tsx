@@ -433,7 +433,7 @@ export default function Dashboard() {
         try {
             setProcessLog(prev => [...prev, "⚙️  Procesando todos los índices..."]);
             // Use analyze-all endpoint
-            const res = await axios.post('http://localhost:8000/analyze-all', payload, {
+            const res = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/analyze-all`, payload, {
                 headers: { Authorization: `Bearer ${accessToken}` }
             });
 
@@ -479,7 +479,7 @@ export default function Dashboard() {
                 end_date: endDate
             };
 
-            const res = await axios.post('http://localhost:8000/generate-report', reportPayload, {
+            const res = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/generate-report`, reportPayload, {
                 responseType: 'blob'
             });
 

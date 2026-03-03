@@ -1322,3 +1322,77 @@ TypeError: unsupported format string passed to NoneType.__format__
 2026-01-22 14:31:46 - wetland_monitor - INFO - perform_single_analysis:418 - Generating map tiles for WaterRatio...
 2026-01-22 14:31:55 - wetland_monitor - INFO - perform_single_analysis:456 - ✓  WRI completado
 2026-01-22 15:08:47 - wetland_monitor - ERROR - <module>:461 - GEE Initialization Error: ee.Initialize: no project found. Call with project= or see http://goo.gle/ee-auth.
+2026-03-03 08:38:55 - wetland_monitor - ERROR - <module>:461 - GEE Initialization Error: ee.Initialize: no project found. Call with project= or see http://goo.gle/ee-auth.
+2026-03-03 08:41:01 - wetland_monitor - INFO - perform_single_analysis:636 - [08:41:01] ⚙️  Hydrology
+2026-03-03 08:41:29 - wetland_monitor - INFO - perform_single_analysis:696 - [08:41:29] ✓  Hydrology completed
+2026-03-03 08:41:29 - wetland_monitor - INFO - perform_single_analysis:636 - [08:41:29] ⚙️  Vegetation
+2026-03-03 08:41:55 - wetland_monitor - INFO - perform_single_analysis:696 - [08:41:55] ✓  Vegetation completed
+2026-03-03 08:41:55 - wetland_monitor - INFO - perform_single_analysis:636 - [08:41:55] ⚙️  WaterQuality
+2026-03-03 08:42:23 - wetland_monitor - INFO - perform_single_analysis:696 - [08:42:23] ✓  WaterQuality completed
+2026-03-03 08:42:23 - wetland_monitor - INFO - perform_single_analysis:636 - [08:42:23] ⚙️  SoilVegetation
+2026-03-03 08:42:39 - wetland_monitor - INFO - perform_single_analysis:696 - [08:42:39] ✓  SoilVegetation completed
+2026-03-03 08:42:39 - wetland_monitor - INFO - perform_single_analysis:636 - [08:42:39] ⚙️  AlgaeBloom
+2026-03-03 08:42:55 - wetland_monitor - INFO - perform_single_analysis:696 - [08:42:55] ✓  AlgaeBloom completed
+2026-03-03 08:42:55 - wetland_monitor - INFO - perform_single_analysis:636 - [08:42:55] ⚙️  WaterRatio
+2026-03-03 08:43:10 - wetland_monitor - INFO - perform_single_analysis:696 - [08:43:10] ✓  WaterRatio completed
+2026-03-03 08:55:42 - wetland_monitor - INFO - perform_single_analysis:636 - [08:55:42] ⚙️  Hydrology
+2026-03-03 08:56:03 - wetland_monitor - INFO - perform_single_analysis:696 - [08:56:03] ✓  Hydrology completed
+2026-03-03 08:56:03 - wetland_monitor - INFO - perform_single_analysis:636 - [08:56:03] ⚙️  Vegetation
+2026-03-03 08:56:15 - wetland_monitor - INFO - perform_single_analysis:696 - [08:56:15] ✓  Vegetation completed
+2026-03-03 08:56:15 - wetland_monitor - INFO - perform_single_analysis:636 - [08:56:15] ⚙️  WaterQuality
+2026-03-03 08:56:26 - wetland_monitor - INFO - perform_single_analysis:696 - [08:56:26] ✓  WaterQuality completed
+2026-03-03 08:56:26 - wetland_monitor - INFO - perform_single_analysis:636 - [08:56:26] ⚙️  SoilVegetation
+2026-03-03 08:56:36 - wetland_monitor - INFO - perform_single_analysis:696 - [08:56:36] ✓  SoilVegetation completed
+2026-03-03 08:56:36 - wetland_monitor - INFO - perform_single_analysis:636 - [08:56:36] ⚙️  AlgaeBloom
+2026-03-03 08:56:48 - wetland_monitor - INFO - perform_single_analysis:696 - [08:56:48] ✓  AlgaeBloom completed
+2026-03-03 08:56:48 - wetland_monitor - INFO - perform_single_analysis:636 - [08:56:48] ⚙️  WaterRatio
+2026-03-03 08:56:59 - wetland_monitor - INFO - perform_single_analysis:696 - [08:56:59] ✓  WaterRatio completed
+2026-03-03 09:00:15 - wetland_monitor - INFO - perform_single_analysis:636 - [09:00:15] ⚙️  Hydrology
+2026-03-03 09:00:26 - wetland_monitor - INFO - perform_single_analysis:696 - [09:00:26] ✓  Hydrology completed
+2026-03-03 09:00:26 - wetland_monitor - INFO - perform_single_analysis:636 - [09:00:26] ⚙️  Vegetation
+2026-03-03 09:00:38 - wetland_monitor - INFO - perform_single_analysis:696 - [09:00:38] ✓  Vegetation completed
+2026-03-03 09:00:38 - wetland_monitor - INFO - perform_single_analysis:636 - [09:00:38] ⚙️  WaterQuality
+2026-03-03 09:00:48 - wetland_monitor - INFO - perform_single_analysis:696 - [09:00:48] ✓  WaterQuality completed
+2026-03-03 09:00:48 - wetland_monitor - INFO - perform_single_analysis:636 - [09:00:48] ⚙️  SoilVegetation
+2026-03-03 09:01:01 - wetland_monitor - INFO - perform_single_analysis:696 - [09:01:01] ✓  SoilVegetation completed
+2026-03-03 09:01:01 - wetland_monitor - INFO - perform_single_analysis:636 - [09:01:01] ⚙️  AlgaeBloom
+2026-03-03 09:01:19 - wetland_monitor - INFO - perform_single_analysis:696 - [09:01:19] ✓  AlgaeBloom completed
+2026-03-03 09:01:19 - wetland_monitor - INFO - perform_single_analysis:636 - [09:01:19] ⚙️  WaterRatio
+2026-03-03 09:01:30 - wetland_monitor - INFO - perform_single_analysis:696 - [09:01:30] ✓  WaterRatio completed
+2026-03-03 09:05:26 - wetland_monitor - INFO - perform_single_analysis:636 - [09:05:26] ⚙️  Hydrology
+2026-03-03 09:05:37 - wetland_monitor - INFO - perform_single_analysis:696 - [09:05:37] ✓  Hydrology completed
+2026-03-03 09:05:37 - wetland_monitor - INFO - perform_single_analysis:636 - [09:05:37] ⚙️  Vegetation
+2026-03-03 09:05:46 - wetland_monitor - INFO - perform_single_analysis:696 - [09:05:46] ✓  Vegetation completed
+2026-03-03 09:05:46 - wetland_monitor - INFO - perform_single_analysis:636 - [09:05:46] ⚙️  WaterQuality
+2026-03-03 09:05:57 - wetland_monitor - INFO - perform_single_analysis:696 - [09:05:57] ✓  WaterQuality completed
+2026-03-03 09:05:57 - wetland_monitor - INFO - perform_single_analysis:636 - [09:05:57] ⚙️  SoilVegetation
+2026-03-03 09:06:08 - wetland_monitor - INFO - perform_single_analysis:696 - [09:06:08] ✓  SoilVegetation completed
+2026-03-03 09:06:08 - wetland_monitor - INFO - perform_single_analysis:636 - [09:06:08] ⚙️  AlgaeBloom
+2026-03-03 09:06:19 - wetland_monitor - INFO - perform_single_analysis:696 - [09:06:19] ✓  AlgaeBloom completed
+2026-03-03 09:06:19 - wetland_monitor - INFO - perform_single_analysis:636 - [09:06:19] ⚙️  WaterRatio
+2026-03-03 09:06:29 - wetland_monitor - INFO - perform_single_analysis:696 - [09:06:29] ✓  WaterRatio completed
+2026-03-03 09:20:18 - wetland_monitor - INFO - perform_single_analysis:636 - [09:20:18] ⚙️  Hydrology
+2026-03-03 09:20:37 - wetland_monitor - INFO - perform_single_analysis:696 - [09:20:37] ✓  Hydrology completed
+2026-03-03 09:20:37 - wetland_monitor - INFO - perform_single_analysis:636 - [09:20:37] ⚙️  Vegetation
+2026-03-03 09:20:46 - wetland_monitor - INFO - perform_single_analysis:696 - [09:20:46] ✓  Vegetation completed
+2026-03-03 09:20:46 - wetland_monitor - INFO - perform_single_analysis:636 - [09:20:46] ⚙️  WaterQuality
+2026-03-03 09:20:56 - wetland_monitor - INFO - perform_single_analysis:696 - [09:20:56] ✓  WaterQuality completed
+2026-03-03 09:20:56 - wetland_monitor - INFO - perform_single_analysis:636 - [09:20:56] ⚙️  SoilVegetation
+2026-03-03 09:21:05 - wetland_monitor - INFO - perform_single_analysis:696 - [09:21:05] ✓  SoilVegetation completed
+2026-03-03 09:21:05 - wetland_monitor - INFO - perform_single_analysis:636 - [09:21:05] ⚙️  AlgaeBloom
+2026-03-03 09:21:15 - wetland_monitor - INFO - perform_single_analysis:696 - [09:21:15] ✓  AlgaeBloom completed
+2026-03-03 09:21:15 - wetland_monitor - INFO - perform_single_analysis:636 - [09:21:15] ⚙️  WaterRatio
+2026-03-03 09:21:25 - wetland_monitor - INFO - perform_single_analysis:696 - [09:21:25] ✓  WaterRatio completed
+2026-03-03 09:22:21 - wetland_monitor - INFO - perform_single_analysis:636 - [09:22:21] ⚙️  Hydrology
+2026-03-03 09:22:33 - wetland_monitor - INFO - perform_single_analysis:696 - [09:22:33] ✓  Hydrology completed
+2026-03-03 09:22:33 - wetland_monitor - INFO - perform_single_analysis:636 - [09:22:33] ⚙️  Vegetation
+2026-03-03 09:22:40 - wetland_monitor - INFO - perform_single_analysis:696 - [09:22:40] ✓  Vegetation completed
+2026-03-03 09:22:40 - wetland_monitor - INFO - perform_single_analysis:636 - [09:22:40] ⚙️  WaterQuality
+2026-03-03 09:22:48 - wetland_monitor - INFO - perform_single_analysis:696 - [09:22:48] ✓  WaterQuality completed
+2026-03-03 09:22:48 - wetland_monitor - INFO - perform_single_analysis:636 - [09:22:48] ⚙️  SoilVegetation
+2026-03-03 09:22:57 - wetland_monitor - INFO - perform_single_analysis:696 - [09:22:57] ✓  SoilVegetation completed
+2026-03-03 09:22:57 - wetland_monitor - INFO - perform_single_analysis:636 - [09:22:57] ⚙️  AlgaeBloom
+2026-03-03 09:23:06 - wetland_monitor - INFO - perform_single_analysis:696 - [09:23:06] ✓  AlgaeBloom completed
+2026-03-03 09:23:06 - wetland_monitor - INFO - perform_single_analysis:636 - [09:23:06] ⚙️  WaterRatio
+2026-03-03 09:23:16 - wetland_monitor - INFO - perform_single_analysis:696 - [09:23:16] ✓  WaterRatio completed
+2026-03-03 09:50:24 - wetland_monitor - ERROR - <module>:461 - GEE Initialization Error: ee.Initialize: no project found. Call with project= or see http://goo.gle/ee-auth.

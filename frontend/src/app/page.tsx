@@ -206,17 +206,17 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear }: IndexCard
                     </div>
 
                     {/* Robust Statistics */}
-                    {res && res.stats.current_std !== undefined && (
+                    {res && res.stats.current_std != null && (
                         <div className="flex flex-col gap-1 mt-1 pl-1">
                             <div className="text-[10px] text-gray-400 font-mono flex items-center gap-1">
                                 <span className="text-gray-600">σ:</span> ±{res.stats.current_std.toFixed(4)}
                             </div>
-                            {res.stats.cv !== undefined && (
+                            {res.stats.cv != null && (
                                 <div className="text-[10px] text-gray-400 font-mono flex items-center gap-1">
                                     <span className="text-gray-600">CV:</span> {res.stats.cv.toFixed(1)}%
                                 </div>
                             )}
-                            {res.stats.outlier_count !== undefined && res.stats.outlier_count > 0 && (
+                            {res.stats.outlier_count != null && res.stats.outlier_count > 0 && (
                                 <div className="text-[10px] text-yellow-400 font-mono flex items-center gap-1 bg-yellow-400/10 px-1.5 py-0.5 rounded-full w-fit border border-yellow-400/20">
                                     ⚠ {res.stats.outlier_count} outliers
                                 </div>
@@ -226,7 +226,7 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear }: IndexCard
                 </div>
 
                 {/* Trend Percentage */}
-                {res && (
+                {res && res.stats.trend != null && (
                     <div className={`absolute top-12 right-0 text-[11px] font-mono px-2 py-1 rounded-l-lg backdrop-blur-md border-l border-y border-white/5 font-bold 
                         ${res.stats.trend >= 0 ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
                         {res.stats.trend > 0 ? '+' : ''}{res.stats.trend.toFixed(1)}%

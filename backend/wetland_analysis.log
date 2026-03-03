@@ -1396,3 +1396,4 @@ TypeError: unsupported format string passed to NoneType.__format__
 2026-03-03 09:23:06 - wetland_monitor - INFO - perform_single_analysis:636 - [09:23:06] ⚙️  WaterRatio
 2026-03-03 09:23:16 - wetland_monitor - INFO - perform_single_analysis:696 - [09:23:16] ✓  WaterRatio completed
 2026-03-03 09:50:24 - wetland_monitor - ERROR - <module>:461 - GEE Initialization Error: ee.Initialize: no project found. Call with project= or see http://goo.gle/ee-auth.
+2026-03-03 11:24:41 - wetland_monitor - ERROR - <module>:463 - GEE Initialization Error: ee.Initialize: no project found. Call with project= or see http://goo.gle/ee-auth.

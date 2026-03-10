@@ -11,20 +11,39 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import concurrent.futures
 
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from dateutil.relativedelta import relativedelta
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import geopandas as gpd
+import tempfile
+import shutil
+import zipfile
+import fiona
+import pandas as pd
+from shapely.ops import transform
+
+def to_2d(x, y, z=None):
+    """Force 2D coordinates for GE compatibility."""
+    return (x, y)
+
+fiona.drvsupport.supported_drivers['KML'] = 'rw' # Enable KML support
+fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
+
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================
 # MODULE: UTILS & LOGGING
@@ -131,10 +150,28 @@ def validate_geometry(geojson: Dict[str, Any], min_area_km2: float = 0.01, max_a
     try:
         geometry = geojson.get('geometry')
         if not geometry:
+            logger.error("Missing 'geometry' field in GeoJSON")
             raise ValidationError("Missing 'geometry' field in GeoJSON")
+        
+        geom_type = geometry.get('type')
+        
+        # Force 2D geometries (GEE can fail with 3D from KML)
+        # Simple recursion to strip Z if present in coordinates
+        def strip_z(coords):
+            if not isinstance(coords, (list, tuple)):
+                return coords
+            if len(coords) > 0 and isinstance(coords[0], (int, float)):
+                return list(coords[:2])
+            return [strip_z(c) for c in coords]
+        
+        if 'coordinates' in geometry:
+            geometry['coordinates'] = strip_z(geometry['coordinates'])
+
         aoi = ee.Geometry(geometry)
+        aoi = aoi.simplify(maxError=1)
         return aoi
     except Exception as e:
+        logger.error(f"Geometry validation failed: {e}")
         raise ValidationError(f"Geometry validation failed: {e}")
 
 # ==========================================
@@ -217,7 +254,8 @@ def calculate_trend_statistics(current_data: List[Dict], previous_data: List[Dic
     prev_med = previous_stats['median']
     
     trend_pct = None
-    if abs(prev_med) > 0.01:
+    # Lower threshold for detecting trends in wetlands (from 0.01 to 0.001)
+    if abs(prev_med) > 0.001:
         trend_pct = ((curr_med - prev_med) / prev_med) * 100
         trend_pct = max(min(trend_pct, 1000), -1000)
     
@@ -240,7 +278,7 @@ def download_image(url: str) -> io.BytesIO:
         response.raise_for_status()
         return io.BytesIO(response.content)
     except Exception as e:
-        print(f"Error downloading image: {e}")
+        logger.error(f"Error downloading image: {e}")
         return None
 
 def get_vis_params(mode: str) -> Dict[str, Any]:
@@ -261,12 +299,12 @@ def get_index_name(mode: str) -> str:
 def get_mode_description(mode: str) -> str:
     """Get description for each analysis mode."""
     descs = {
-        'Hydrology': 'Análisis de humedad y cuerpos de agua superficial mediante índice MNDWI',
-        'Vegetation': 'Análisis de salud vegetativa mediante índice NDRE (clorofila)',
-        'WaterQuality': 'Análisis de calidad de agua y turbidez mediante índice NDCI',
-        'SoilVegetation': 'Análisis de vegetación ajustado por influencia del suelo (SAVI)',
-        'AlgaeBloom': 'Detección de floraciones algales mediante índice FAI',
-        'WaterRatio': 'Ratio agua-tierra mediante índice WRI'
+        'Hydrology': 'El índice MNDWI (Modified Normalized Difference Water Index) se utiliza para realzar cuerpos de agua abiertos y áreas de alta humedad. Valores positivos indican presencia de agua superficial, mientras que valores negativos representan suelo o vegetación seca.',
+        'Vegetation': 'El índice NDRE (Normalized Difference Red Edge) es sensible al contenido de clorofila en la vegetación densa. Es fundamental para monitorear el vigor fotosintético y detectar estrés hídrico temprano en vegetación de humedal.',
+        'WaterQuality': 'El índice NDCI (Normalized Difference Chlorophyll Index) permite estimar la concentración de clorofila-a en cuerpos de agua. Es un indicador clave del estado trófico y la posible presencia de fitoplancton en aguas lénticas.',
+        'SoilVegetation': 'El índice SAVI (Soil Adjusted Vegetation Index) minimiza la influencia del brillo del suelo en el análisis de vegetación. Es ideal para humedales con cobertura vegetal dispersa o estacional.',
+        'AlgaeBloom': 'El índice FAI (Floating Algae Index) detecta vegetación flotante y floraciones algales en la superficie del agua. Es crucial para identificar procesos de eutrofización y blooms de cianobacterias.',
+        'WaterRatio': 'El índice WRI (Water Ratio Index) es un clasificador robusto para la discriminación entre superficies de agua y tierra. Valores > 1 indican una alta probabilidad de superficie acuática pura.'
     }
     return descs.get(mode, mode)
 
@@ -358,35 +396,62 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
         stats = res.get('stats', {})
         maps = res.get('maps', {})
         
-        doc.add_heading(f'{mode} - {get_index_name(mode)}', level=3)
-        doc.add_paragraph(get_mode_description(mode), style='Intense Quote')
+        # --- FICHA TÉCNICA HEADER ---
+        doc.add_heading(f'FICHA TÉCNICA: {get_index_name(mode)}', level=2)
+        p_desc = doc.add_paragraph(get_mode_description(mode))
+        p_desc.style = 'Intense Quote'
         
-        st_table = doc.add_table(rows=7, cols=2)
-        st_table.style = 'Light List Accent 1'
-        st_table.rows[0].cells[0].text = 'Valor Actual (Mediana)'
-        st_table.rows[0].cells[1].text = f"{stats.get('current', 0):.4f}"
-        st_table.rows[1].cells[0].text = 'Valor Año Anterior'
-        st_table.rows[1].cells[1].text = f"{stats.get('last', 0):.4f}"
+        # --- TABLA DE INDICADORES CLAVE ---
+        doc.add_heading('1. Estadísticas y Tendencias', level=3)
+        st_table = doc.add_table(rows=5, cols=4)
+        st_table.style = 'Table Grid'
         
-        trend = stats.get('trend', 0)
-        trend_cell = st_table.rows[2].cells[1]
-        trend_cell.text = f"{trend:+.2f}%"
-        st_table.rows[2].cells[0].text = 'Tendencia'
-        color = RGBColor(34, 197, 94) if trend > 0 else RGBColor(239, 68, 68)
-        trend_cell.paragraphs[0].runs[0].font.color.rgb = color
+        def safe_fmt(val, fmt=".4f", suffix=""):
+            if val is None: return "N/A"
+            if fmt == "": return str(val) + suffix
+            return format(val, fmt) + suffix
+
+        # Row 0: Labels
+        st_table.rows[0].cells[0].text = 'Indicador'
+        st_table.rows[0].cells[1].text = 'Valor Actual'
         
-        st_table.rows[3].cells[0].text = 'Desviación Estándar'
-        st_table.rows[3].cells[1].text = f"{stats.get('current_std', 0):.4f}"
-        st_table.rows[4].cells[0].text = 'Coeficiente de Variación'
-        st_table.rows[4].cells[1].text = f"{stats.get('cv', 0):.2f}%"
-        st_table.rows[5].cells[0].text = 'Puntos de Datos'
-        st_table.rows[5].cells[1].text = str(stats.get('data_count', 0))
-        st_table.rows[6].cells[0].text = 'Valores Atípicos'
-        st_table.rows[6].cells[1].text = str(stats.get('outlier_count', 0))
-        doc.add_paragraph()
+        baseline_period = stats.get('baseline_period')
+        header_prev = f'Valor Inicial ({baseline_period})' if baseline_period else 'Valor Anterior'
+        st_table.rows[0].cells[2].text = header_prev
+        st_table.rows[0].cells[3].text = 'Variación %'
         
-        doc.add_heading('Mapas del Índice', level=4)
+        # Data Rows
+        st_table.rows[1].cells[0].text = 'Valor Mediano'
+        st_table.rows[1].cells[1].text = safe_fmt(stats.get('current'))
+        st_table.rows[1].cells[2].text = safe_fmt(stats.get('last'))
         
+        trend = stats.get('trend')
+        trend_cell = st_table.rows[1].cells[3]
+        if trend is not None:
+            trend_cell.text = f"{trend:+.1f}%"
+            color = RGBColor(34, 197, 94) if trend > 0 else RGBColor(239, 68, 68)
+            trend_cell.paragraphs[0].runs[0].font.bold = True
+            trend_cell.paragraphs[0].runs[0].font.color.rgb = color
+        else:
+            trend_cell.text = "N/A"
+
+        st_table.rows[2].cells[0].text = 'Desviación Est.'
+        st_table.rows[2].cells[1].text = safe_fmt(stats.get('current_std'))
+        st_table.rows[2].cells[2].text = 'Puntos Datos'
+        st_table.rows[2].cells[3].text = safe_fmt(stats.get('data_count'), "")
+
+        st_table.rows[3].cells[0].text = 'Confianza (CV)'
+        cv = stats.get('cv')
+        cv_text = safe_fmt(cv, ".2f", "%")
+        st_table.rows[3].cells[1].text = cv_text
+        if cv is not None and cv > 30:
+            st_table.rows[3].cells[1].paragraphs[0].add_run(" (Variabilidad Alta)").font.color.rgb = RGBColor(245, 158, 11)
+
+        st_table.rows[4].cells[0].text = 'Valores Atípicos'
+        st_table.rows[4].cells[1].text = safe_fmt(stats.get('outlier_count'), "")
+        
+        # --- ANÁLISIS VISUAL ---
+        doc.add_heading('2. Cartografía e Imágenes Satelitales', level=3)
         img_start = None
         img_end = None
         
@@ -399,35 +464,39 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
         if img_start or img_end:
             map_table = doc.add_table(rows=2, cols=2)
             map_table.autofit = True
-            map_table.style = 'Table Grid'
             
             c_start = map_table.rows[0].cells[0]
             c_end = map_table.rows[0].cells[1]
-            c_cap_start = map_table.rows[1].cells[0]
-            c_cap_end = map_table.rows[1].cells[1]
             
-            c_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             if img_start:
+                c_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 c_start.paragraphs[0].add_run().add_picture(img_start, width=Inches(2.8))
-                c_cap_start.text = f"Mapa Inicial ({start_date})"
-                c_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                map_table.rows[1].cells[0].text = f"Mapa Base (S-2 {start_date})"
+                map_table.rows[1].cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 
-            c_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             if img_end:
+                c_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 c_end.paragraphs[0].add_run().add_picture(img_end, width=Inches(2.8))
-                c_cap_end.text = f"Mapa Final ({end_date})"
-                c_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-                
+                map_table.rows[1].cells[1].text = f"Mapa Actual (S-2 {end_date})"
+                map_table.rows[1].cells[1].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Legend
         legend = create_legend_image(mode)
         if legend:
-            doc.add_picture(legend, width=Inches(5))
-            doc.add_paragraph("Escala de Valores (Válida para ambos mapas)", style='Caption')
+            p_leg = doc.add_paragraph()
+            p_leg.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p_leg.add_run().add_picture(legend, width=Inches(4.5))
+            doc.add_paragraph(f"Escala de Intensidad del Índice {get_index_name(mode)}", style='Caption').alignment = WD_ALIGN_PARAGRAPH.CENTER
             
-        doc.add_heading('Evolución Temporal', level=4)
+        # --- SERIE TEMPORAL ---
+        doc.add_heading('3. Comportamiento en el Tiempo', level=3)
         ts = res.get('time_series', [])
         if ts:
             chart = create_temporal_chart(ts, mode)
-            if chart: doc.add_picture(chart, width=Inches(6))
+            if chart: 
+                p_chart = doc.add_paragraph()
+                p_chart.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p_chart.add_run().add_picture(chart, width=Inches(6))
             
         doc.add_page_break()
         
@@ -455,12 +524,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# GEE Initialization
+# GEE Initialization (Attempt global init, but handle failure gracefully)
 try:
+    # Try global init without project first (for backward compatibility/local auth)
     ee.Initialize()
-    logger.info("Google Earth Engine Initialized Successfully")
-except Exception as e:
-    logger.error(f"GEE Initialization Error: {e}")
+    logger.info("Google Earth Engine Initialized globally")
+except Exception:
+    logger.warning("Global GEE init failed. Will attempt per-request initialization.")
+
+def ensure_ee_initialized(project_id: str = None):
+    """Ensure EE is initialized with a project ID."""
+    try:
+        # Check if already initialized
+        ee.Projection('EPSG:4326') 
+    except Exception:
+        # Not initialized or needs project
+        try:
+            p = project_id or os.getenv("GEE_PROJECT_ID", "ee-jonathanubo")
+            ee.Initialize(project=p)
+            logger.info(f"GEE Initialized with project: {p}")
+        except Exception as e:
+            logger.error(f"Failed to initialize GEE: {e}")
+            raise ValidationError(f"Earth Engine initialization failed: {e}")
 
 class AnalysisRequest(BaseModel):
     geojson: Dict[str, Any]
@@ -494,84 +579,76 @@ def normalize_index_value(value, mode):
     return max(min_v, min(max_v, value))
 
 def get_sentinel_data(aoi, start_date, end_date, mode):
-    """Get and process Sentinel-2 data."""
+    """Get and process Sentinel-2 data with scaling and cloud masking."""
+    
+    def mask_clouds(img):
+        cloud_bit_mask = 1 << 10
+        cirrus_bit_mask = 1 << 11
+        qa = img.select('QA60')
+        # SCL (Scene Classification Layer) for more robust masking if available
+        # 3: Cloud Shadows, 8: Cloud Medium Prob, 9: Cloud High Prob, 10: Cirrus
+        mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(
+               qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+        
+        # Scale bands from 0-10000 to 0-1 (IMPORTANT for SAVI/FAI/NDCI)
+        return img.updateMask(mask).divide(10000).copyProperties(img, ['system:time_start'])
+
+    s2_col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+              .filterBounds(aoi)
+              .filterDate(start_date, end_date)
+              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+              .map(mask_clouds))
+
     if mode == "Hydrology":
         # MNDWI (B3 Green, B11 SWIR)
-        s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-              .filterBounds(aoi).filterDate(start_date, end_date)
-              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
-        
         def add_mndwi(img):
-            mndwi = img.normalizedDifference(['B3', 'B11']).rename('MNDWI')
-            return img.addBands(mndwi).select('MNDWI').rename('Value') \
-                .copyProperties(img, ['system:time_start'])
-                
-        return s2.map(add_mndwi)
+            mndwi = img.normalizedDifference(['B3', 'B11']).rename('Value')
+            return img.addBands(mndwi).select('Value').copyProperties(img, ['system:time_start'])
+        return s2_col.map(add_mndwi)
 
     elif mode == "Vegetation":
         # NDRE (B8 NIR, B5 RedEdge)
-        s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-              .filterBounds(aoi).filterDate(start_date, end_date)
-              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
-        
         def add_ndre(img):
-            ndre = img.normalizedDifference(['B8', 'B5']).rename('NDRE')
-            return img.addBands(ndre).select('NDRE').rename('Value') \
-                .copyProperties(img, ['system:time_start'])
-        return s2.map(add_ndre)
+            ndre = img.normalizedDifference(['B8', 'B5']).rename('Value')
+            return img.addBands(ndre).select('Value').copyProperties(img, ['system:time_start'])
+        return s2_col.map(add_ndre)
 
     elif mode == "WaterQuality":
         # NDCI (B5 RedEdge, B4 Red)
-        s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-              .filterBounds(aoi).filterDate(start_date, end_date)
-              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
-        
         def calc_ndci(img):
             ndci = img.normalizedDifference(['B5', 'B4']).rename('Value')
             return img.addBands(ndci).select('Value').copyProperties(img, ['system:time_start'])
-        return s2.map(calc_ndci)
+        return s2_col.map(calc_ndci)
 
     elif mode == "SoilVegetation":
         # SAVI ((B8 - B4) / (B8 + B4 + 0.5)) * 1.5
-        s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-              .filterBounds(aoi).filterDate(start_date, end_date)
-              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
-        
         def calc_savi(img):
             savi = img.expression(
                 '((NIR - RED) / (NIR + RED + 0.5)) * 1.5',
                 {'NIR': img.select('B8'), 'RED': img.select('B4')}
             ).rename('Value')
             return img.addBands(savi).select('Value').copyProperties(img, ['system:time_start'])
-        return s2.map(calc_savi)
+        return s2_col.map(calc_savi)
         
     elif mode == "AlgaeBloom":
         # FAI (B8 - (B4 + (B11-B4) * (832.8-664.6)/(1613.7-664.6)))
-        s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-              .filterBounds(aoi).filterDate(start_date, end_date)
-              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
-        
         def calc_fai(img):
             fai = img.expression(
                 'NIR - (RED + (SWIR - RED) * 0.177)',
                 {'NIR': img.select('B8'), 'RED': img.select('B4'), 'SWIR': img.select('B11')}
             ).rename('Value')
             return img.addBands(fai).select('Value').copyProperties(img, ['system:time_start'])
-        return s2.map(calc_fai)
+        return s2_col.map(calc_fai)
     
     elif mode == "WaterRatio":
         # WRI (Green + Red) / (NIR + SWIR) -> (B3 + B4) / (B8 + B11)
-        s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-              .filterBounds(aoi).filterDate(start_date, end_date)
-              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)))
-        
         def calc_wri(img):
             wri = img.expression(
                 '(GREEN + RED) / (NIR + SWIR)',
                 {'GREEN': img.select('B3'), 'RED': img.select('B4'), 'NIR': img.select('B8'), 'SWIR': img.select('B11')}
             ).rename('Value')
             return img.addBands(wri).select('Value').copyProperties(img, ['system:time_start'])
-        return s2.map(calc_wri)
+        return s2_col.map(calc_wri)
 
     return ee.ImageCollection([])
 
@@ -584,7 +661,7 @@ def analyze_period(aoi, start_date, end_date, mode):
         mean_val = img.reduceRegion(
             reducer=ee.Reducer.median(), # Median is robust to outliers
             geometry=aoi,
-            scale=10,
+            scale=10, # Reverted to native 10m resolution for maximum detail
             maxPixels=1e9
         ).get('Value')
         return ee.Feature(None, {'date': date, 'value': mean_val})
@@ -608,10 +685,10 @@ def generate_map_url(aoi, start, end, mode):
     else:
         rgb_vis = {'min': 0, 'max': 0.3, 'bands': ['B4', 'B3', 'B2']}
         # Fallback to S2 collection for RGB if 'latest' only has Value band
-        s2_col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        s2_col_rgb = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
                   .filterBounds(aoi).filterDate(start, end)
                   .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)))
-        rgb_map = s2_col.median().clip(aoi).divide(10000).getMapId(rgb_vis)
+        rgb_map = s2_col_rgb.median().clip(aoi).divide(10000).getMapId(rgb_vis)
     
     metric_vis = get_vis_params(mode)
     metric_map = latest.select('Value').getMapId(metric_vis)
@@ -635,13 +712,24 @@ def generate_map_url(aoi, start, end, mode):
 def perform_single_analysis(request, mode):
     """Perform robust analysis for a single mode."""
     try:
+        ensure_ee_initialized(request.projectId)
         logger.info(log_process_stage('', mode, 'processing'))
         start_obj, end_obj = validate_date_range(request.startDate, request.endDate)
         aoi = validate_geometry(request.geojson)
         
+        # Auto-expand temporal window if insufficient data (Option 1)
         current_data = analyze_period(aoi, request.startDate, request.endDate, mode)
-        if not current_data or len(current_data) < 3:
-            raise ValidationError(f"Insufficient data for {mode}")
+        expansions = 0
+        current_start_obj = start_obj
+
+        while (not current_data or len([d for d in current_data if d.get('value') is not None]) < 3) and expansions < 4:
+            expansions += 1
+            current_start_obj = current_start_obj - relativedelta(months=3)
+            logger.info(f"[{mode}] Insufficient data. Expanding temporal window backwards to {current_start_obj.strftime('%Y-%m-%d')}")
+            current_data = analyze_period(aoi, current_start_obj.strftime("%Y-%m-%d"), request.endDate, mode)
+
+        if not current_data or len([d for d in current_data if d.get('value') is not None]) < 3:
+            logger.warning(f"Still insufficient data for {mode} after expanding 1 year backwards. Using whatever is available.")
             
         coverage = validate_temporal_coverage(current_data)
         if not coverage['valid']:
@@ -651,9 +739,27 @@ def perform_single_analysis(request, mode):
         current_data_flagged = detect_outliers(current_data)
         outlier_count = sum(1 for d in current_data_flagged if d.get('is_outlier'))
         
-        last_start = (start_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
-        last_end = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
-        last_data = analyze_period(aoi, last_start, last_end, mode)
+        # Baseline logic: If range > 2 years, compare against the beginning of the period (Historical Baseline)
+        total_range_days = (end_obj - start_obj).days
+        if total_range_days > 730:
+            last_start = request.startDate
+            last_end = (start_obj + relativedelta(years=1)).strftime("%Y-%m-%d")
+            logger.info(f"[{mode}] Using Historical Baseline for statistics (Long range: {total_range_days} days)")
+            
+            last_data = analyze_period(aoi, last_start, last_end, mode)
+            # Auto-expansion Forward for Historical Baseline if data is missing (e.g. 2016 clouds)
+            b_exp = 0
+            while (not last_data or len([d for d in last_data if d.get('value') is not None]) < 3) and b_exp < 4:
+                b_exp += 1
+                last_end_obj = datetime.strptime(last_end, "%Y-%m-%d") + relativedelta(months=3)
+                last_end = last_end_obj.strftime("%Y-%m-%d")
+                logger.info(f"[{mode}] Insufficient baseline data. Expanding baseline window forward to {last_end}")
+                last_data = analyze_period(aoi, last_start, last_end, mode)
+        else:
+            last_start = (current_start_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
+            last_end = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
+            last_data = analyze_period(aoi, last_start, last_end, mode)
+
         trend_stats = calculate_trend_statistics(current_data_flagged, last_data) or {}
         
         # Start/End Year Maps
@@ -679,7 +785,8 @@ def perform_single_analysis(request, mode):
                 "trend": trend_stats.get('trend_percent', 0),
                 "outlier_count": outlier_count,
                 "data_count": current_stats['count'],
-                "cv": current_stats['cv']
+                "cv": current_stats['cv'],
+                "baseline_period": f"{last_start} a {last_end}"
             },
             "time_series": current_data_flagged,
             "maps": maps,
@@ -759,15 +866,124 @@ async def analyze_all(request: AnalysisRequest, authorization: str = Header(None
         results = {}
         modes = ["Hydrology", "Vegetation", "WaterQuality", "SoilVegetation", "AlgaeBloom", "WaterRatio"]
         
-        for m in modes:
-            logger.info(log_process_stage('', m, 'processing'))
-            results[m] = perform_single_analysis(request, m)
+        # Parallel Execution of Analysis Modes
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(modes)) as executor:
+            # Map modes to futures
+            future_to_mode = {executor.submit(perform_single_analysis, request, m): m for m in modes}
+            
+            for future in concurrent.futures.as_completed(future_to_mode):
+                m = future_to_mode[future]
+                try:
+                    results[m] = future.result()
+                    logger.info(f"Parallel Task {m}: Success")
+                except Exception as exc:
+                    logger.error(f"Parallel Task {m} generated an exception: {exc}")
+                    results[m] = create_error_response(exc, m)
             
         logger.info(log_process_stage('', None, 'final'))
         return {"status": "success", "data": results}
     except Exception as e:
         logger.error(f"Analyze-all Error: {e}")
         raise HTTPException(500, detail=f"Backend Error: {str(e)}")
+
+@app.post("/process-spatial-file")
+async def process_spatial_file(file: UploadFile = File(...)):
+    """Process uploaded KML, KMZ, or SHP (zipped) files and return GeoJSON."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        file_path = os.path.join(temp_dir, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Determine file type and process
+        if file.filename.lower().endswith('.zip'):
+            # Assume it's a Zipped Shapefile
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+            
+            # Find the .shp file
+            shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
+            if not shp_files:
+                raise HTTPException(400, "No .shp file found in ZIP")
+            gdf = gpd.read_file(os.path.join(temp_dir, shp_files[0]))
+            
+        elif file.filename.lower().endswith(('.kml', '.kmz')):
+            # KMZ is a zipped KML. Unzip it first for robust processing.
+            if file.filename.lower().endswith('.kmz'):
+                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                # Find the main KML file (usually doc.kml)
+                kml_files = [f for f in os.listdir(temp_dir) if f.lower().endswith('.kml')]
+                if not kml_files:
+                    raise HTTPException(400, "No valid KML file found inside KMZ")
+                file_path = os.path.join(temp_dir, kml_files[0])
+                logger.info(f"Extracted KML from KMZ: {kml_files[0]}")
+
+            # Robust KML reading (Multi-layer support)
+            try:
+                gdf = gpd.read_file(file_path)
+                if gdf.empty:
+                    layers = fiona.listlayers(file_path)
+                    all_gdfs = []
+                    for layer in layers:
+                        try:
+                            l_gdf = gpd.read_file(file_path, layer=layer)
+                            if not l_gdf.empty: all_gdfs.append(l_gdf)
+                        except: continue
+                    if all_gdfs:
+                        gdf = gpd.GeoDataFrame(pd.concat(all_gdfs, ignore_index=True))
+            except Exception as e:
+                logger.warning(f"Standard KML read failed, scanning layers: {e}")
+                layers = fiona.listlayers(file_path)
+                all_gdfs = []
+                for layer in layers:
+                    try:
+                        l_gdf = gpd.read_file(file_path, layer=layer)
+                        if not l_gdf.empty: all_gdfs.append(l_gdf)
+                    except: continue
+                if all_gdfs:
+                    gdf = gpd.GeoDataFrame(pd.concat(all_gdfs, ignore_index=True))
+                else:
+                    raise HTTPException(400, f"No se pudo procesar el KML/KMZ: {str(e)}")
+            
+        else:
+            raise HTTPException(400, "Unsupported file format. Use .kml, .kmz, or .zip (for SHP)")
+
+        if gdf.empty:
+            raise HTTPException(400, "The uploaded file contains no valid geometry")
+
+        # Convert to WGS84
+        if gdf.crs and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+        
+        # Merge all geometries into a single polygon/multipolygon
+        combined_geom = gdf.geometry.unary_union
+        
+        # Force 2D coordinates (GEE can fail with 3D from KML)
+        combined_geom = transform(to_2d, combined_geom)
+        
+        # Convert to GeoJSON
+        feature = {
+            "type": "Feature",
+            "geometry": json.loads(gpd.GeoSeries([combined_geom]).to_json())['features'][0]['geometry'],
+            "properties": {"name": file.filename}
+        }
+        
+        # Calculate BBox
+        bounds = combined_geom.bounds # (minx, miny, maxx, maxy)
+        
+        return {
+            "status": "success",
+            "geojson": feature,
+            "bbox": [bounds[0], bounds[1], bounds[2], bounds[3]]
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing spatial file: {e}")
+        raise HTTPException(500, detail=str(e))
+    finally:
+        # ignore_errors=True is important for Windows where files might be temporarily locked
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 @app.post("/generate-report")
 async def generate_report(request: dict):
@@ -787,7 +1003,7 @@ async def generate_report(request: dict):
             headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
     except Exception as e:
-        print(f"Report Error: {e}")
+        logger.error(f"Report Error: {e}")
         raise HTTPException(500, detail=f"Report generation failed: {str(e)}")
 
 @app.get("/")

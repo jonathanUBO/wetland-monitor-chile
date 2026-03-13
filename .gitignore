@@ -27,6 +27,10 @@ gee-key.json
 
 # Project Specific
 *.docx
+*.log
+*.json
+!package.json
+!tsconfig.json
 temp/
 scratch/
 brain/

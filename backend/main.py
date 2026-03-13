@@ -487,6 +487,15 @@ def get_index_status_message(mode: str, stats: Dict, bfast: Dict) -> str:
 
     full_status = f"{base_msg} {reliability}. {spatial}."
     
+    # 3. Add Seasonal/Structural Context (BFAST)
+    if bfast:
+        if bfast.get('seasonal') and any(v != 0 for v in bfast['seasonal']):
+            full_status += " Se detectó un patrón estacional rítmico en la serie temporal."
+        
+        breakpoints = bfast.get('breakpoints', [])
+        if breakpoints:
+            full_status += f" Se identificaron {len(breakpoints)} cambios estructurales (quiebres de tendencia) en {', '.join(breakpoints)}."
+
     if shocks:
         full_status += f" Se han identificado {len(shocks)} anomalías abruptas (choques) que podrían indicar eventos meteorológicos extremos."
         

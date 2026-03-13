@@ -204,8 +204,16 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, selectedWet
                         {/* CONTROLS REMOVED */}
                     </div>
 
-                    <div className="text-3xl font-mono font-medium text-white drop-shadow-md mt-1">
-                        {res?.stats?.current != null ? res.stats.current.toFixed(3) : '---'}
+                    <div className="text-3xl font-mono font-medium text-white drop-shadow-md mt-1 flex items-center justify-between">
+                        <span>
+                            {res?.stats?.trend != null ? 
+                                `${res.stats.trend > 0 ? '+' : ''}${res.stats.trend.toFixed(1)}%` : 
+                                '0.0%'
+                            }
+                        </span>
+                        <div className={`text-xs font-mono px-2 py-1 rounded-lg backdrop-blur-md border border-white/10 text-gray-400 font-normal`}>
+                             {res?.stats?.current != null ? res.stats.current.toFixed(4) : '---'}
+                        </div>
                     </div>
 
                     {/* Robust Statistics */}
@@ -228,13 +236,6 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, selectedWet
                     )}
                 </div>
 
-                {/* Trend Percentage */}
-                {res?.stats?.trend != null && (
-                    <div className={`absolute top-12 right-0 text-xs font-mono px-2 py-1 rounded-l-lg backdrop-blur-md border-l border-y border-white/5 font-bold 
-                        ${res.stats.trend >= 0 ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
-                        {res.stats.trend > 0 ? '+' : ''}{res.stats.trend.toFixed(1)}%
-                    </div>
-                )}
             </div>
 
             {/* MAP BACKGROUND */}

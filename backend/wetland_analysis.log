@@ -1,0 +1,467 @@
+2026-03-12 11:09:39 - wetland_monitor - WARNING - <module>:806 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 11:10:25 - wetland_monitor - WARNING - <module>:806 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 11:11:36 - wetland_monitor - WARNING - <module>:806 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 11:19:21 - wetland_monitor - WARNING - <module>:806 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 11:19:27 - wetland_monitor - WARNING - <module>:806 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 11:21:21 - wetland_monitor - INFO - process_spatial_file:1202 - Extracted KML from KMZ: doc.kml
+2026-03-12 11:21:26 - wetland_monitor - INFO - perform_single_analysis:997 - [11:21:26] ⚙️  Hydrology
+2026-03-12 11:21:26 - wetland_monitor - INFO - perform_single_analysis:997 - [11:21:26] ⚙️  Vegetation
+2026-03-12 11:21:26 - wetland_monitor - INFO - perform_single_analysis:997 - [11:21:26] ⚙️  WaterQuality
+2026-03-12 11:21:26 - wetland_monitor - INFO - perform_single_analysis:997 - [11:21:26] ⚙️  SoilVegetation
+2026-03-12 11:21:26 - wetland_monitor - INFO - perform_single_analysis:997 - [11:21:26] ⚙️  AlgaeBloom
+2026-03-12 11:21:26 - wetland_monitor - INFO - perform_single_analysis:997 - [11:21:26] ⚙️  WaterRatio
+2026-03-12 11:21:26 - wetland_monitor - INFO - perform_single_analysis:997 - [11:21:26] ⚙️  Salinity
+2026-03-12 11:21:30 - wetland_monitor - INFO - perform_single_analysis:1028 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:21:30 - wetland_monitor - INFO - perform_single_analysis:1028 - [Vegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:21:31 - wetland_monitor - INFO - perform_single_analysis:1037 - [WaterQuality] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:21:31 - wetland_monitor - INFO - perform_single_analysis:1028 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:21:31 - wetland_monitor - INFO - perform_single_analysis:1028 - [Hydrology] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:21:31 - wetland_monitor - INFO - perform_single_analysis:1028 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:21:31 - wetland_monitor - INFO - perform_single_analysis:1037 - [Vegetation] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:21:31 - wetland_monitor - INFO - perform_single_analysis:1028 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:21:31 - wetland_monitor - INFO - perform_single_analysis:1037 - [WaterRatio] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:21:31 - wetland_monitor - INFO - perform_single_analysis:1037 - [Hydrology] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:21:32 - wetland_monitor - INFO - perform_single_analysis:1037 - [SoilVegetation] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:21:32 - wetland_monitor - INFO - perform_single_analysis:1037 - [AlgaeBloom] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:21:33 - wetland_monitor - INFO - perform_single_analysis:1028 - [Salinity] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:21:34 - wetland_monitor - INFO - perform_single_analysis:1037 - [Salinity] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:21:36 - wetland_monitor - INFO - perform_single_analysis:1087 - [11:21:36] ✓  WaterRatio completed
+2026-03-12 11:21:36 - wetland_monitor - INFO - analyze_all:1160 - Parallel Task WaterRatio: Success
+2026-03-12 11:21:36 - wetland_monitor - INFO - perform_single_analysis:1087 - [11:21:36] ✓  Hydrology completed
+2026-03-12 11:21:36 - wetland_monitor - INFO - analyze_all:1160 - Parallel Task Hydrology: Success
+2026-03-12 11:21:37 - wetland_monitor - INFO - perform_single_analysis:1087 - [11:21:37] ✓  SoilVegetation completed
+2026-03-12 11:21:37 - wetland_monitor - INFO - analyze_all:1160 - Parallel Task SoilVegetation: Success
+2026-03-12 11:21:37 - wetland_monitor - INFO - perform_single_analysis:1087 - [11:21:37] ✓  AlgaeBloom completed
+2026-03-12 11:21:37 - wetland_monitor - INFO - analyze_all:1160 - Parallel Task AlgaeBloom: Success
+2026-03-12 11:21:38 - wetland_monitor - INFO - perform_single_analysis:1087 - [11:21:38] ✓  Vegetation completed
+2026-03-12 11:21:38 - wetland_monitor - INFO - analyze_all:1160 - Parallel Task Vegetation: Success
+2026-03-12 11:21:38 - wetland_monitor - INFO - perform_single_analysis:1087 - [11:21:38] ✓  WaterQuality completed
+2026-03-12 11:21:38 - wetland_monitor - INFO - analyze_all:1160 - Parallel Task WaterQuality: Success
+2026-03-12 11:21:40 - wetland_monitor - INFO - perform_single_analysis:1087 - [11:21:40] ✓  Salinity completed
+2026-03-12 11:21:40 - wetland_monitor - INFO - analyze_all:1160 - Parallel Task Salinity: Success
+2026-03-12 11:21:40 - wetland_monitor - INFO - analyze_all:1165 - [11:21:40]   
+2026-03-12 11:32:19 - wetland_monitor - WARNING - <module>:812 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 11:33:27 - wetland_monitor - WARNING - <module>:812 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 11:34:20 - wetland_monitor - INFO - process_spatial_file:1208 - Extracted KML from KMZ: doc.kml
+2026-03-12 11:34:26 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:34:26] ⚙️  Hydrology
+2026-03-12 11:34:26 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:34:26] ⚙️  Vegetation
+2026-03-12 11:34:27 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:34:27] ⚙️  WaterQuality
+2026-03-12 11:34:27 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:34:27] ⚙️  SoilVegetation
+2026-03-12 11:34:27 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:34:27] ⚙️  AlgaeBloom
+2026-03-12 11:34:27 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:34:27] ⚙️  WaterRatio
+2026-03-12 11:34:27 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:34:27] ⚙️  Salinity
+2026-03-12 11:34:28 - wetland_monitor - INFO - perform_single_analysis:1034 - [Hydrology] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:34:29 - wetland_monitor - INFO - perform_single_analysis:1043 - [Hydrology] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:34:31 - wetland_monitor - INFO - perform_single_analysis:1034 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:34:31 - wetland_monitor - INFO - perform_single_analysis:1034 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:34:31 - wetland_monitor - INFO - perform_single_analysis:1034 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:34:31 - wetland_monitor - INFO - perform_single_analysis:1034 - [Salinity] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:34:31 - wetland_monitor - INFO - perform_single_analysis:1034 - [Vegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:34:31 - wetland_monitor - INFO - perform_single_analysis:1034 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:34:31 - wetland_monitor - INFO - perform_single_analysis:1043 - [AlgaeBloom] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:34:31 - wetland_monitor - INFO - perform_single_analysis:1043 - [SoilVegetation] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:34:32 - wetland_monitor - INFO - perform_single_analysis:1043 - [WaterQuality] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:34:32 - wetland_monitor - INFO - perform_single_analysis:1043 - [Salinity] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:34:32 - wetland_monitor - INFO - perform_single_analysis:1043 - [Vegetation] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:34:32 - wetland_monitor - INFO - perform_single_analysis:1043 - [WaterRatio] Insufficient baseline data. Expanding baseline window forward to 2017-06-01
+2026-03-12 11:34:34 - wetland_monitor - INFO - perform_single_analysis:1093 - [11:34:34] ✓  Hydrology completed
+2026-03-12 11:34:34 - wetland_monitor - INFO - analyze_all:1166 - Parallel Task Hydrology: Success
+2026-03-12 11:34:36 - wetland_monitor - INFO - perform_single_analysis:1093 - [11:34:36] ✓  SoilVegetation completed
+2026-03-12 11:34:36 - wetland_monitor - INFO - analyze_all:1166 - Parallel Task SoilVegetation: Success
+2026-03-12 11:34:36 - wetland_monitor - INFO - perform_single_analysis:1093 - [11:34:36] ✓  WaterRatio completed
+2026-03-12 11:34:36 - wetland_monitor - INFO - analyze_all:1166 - Parallel Task WaterRatio: Success
+2026-03-12 11:34:38 - wetland_monitor - INFO - perform_single_analysis:1093 - [11:34:38] ✓  Salinity completed
+2026-03-12 11:34:38 - wetland_monitor - INFO - analyze_all:1166 - Parallel Task Salinity: Success
+2026-03-12 11:34:38 - wetland_monitor - INFO - perform_single_analysis:1093 - [11:34:38] ✓  AlgaeBloom completed
+2026-03-12 11:34:38 - wetland_monitor - INFO - analyze_all:1166 - Parallel Task AlgaeBloom: Success
+2026-03-12 11:34:38 - wetland_monitor - INFO - perform_single_analysis:1093 - [11:34:38] ✓  Vegetation completed
+2026-03-12 11:34:38 - wetland_monitor - INFO - analyze_all:1166 - Parallel Task Vegetation: Success
+2026-03-12 11:34:38 - wetland_monitor - INFO - perform_single_analysis:1093 - [11:34:38] ✓  WaterQuality completed
+2026-03-12 11:34:38 - wetland_monitor - INFO - analyze_all:1166 - Parallel Task WaterQuality: Success
+2026-03-12 11:34:38 - wetland_monitor - INFO - analyze_all:1171 - [11:34:38]   
+2026-03-12 11:40:05 - wetland_monitor - WARNING - <module>:812 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 11:41:13 - wetland_monitor - INFO - process_spatial_file:1217 - Extracted KML from KMZ: doc.kml
+2026-03-12 11:41:16 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:41:16] ⚙️  Hydrology
+2026-03-12 11:41:16 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:41:16] ⚙️  Vegetation
+2026-03-12 11:41:16 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:41:16] ⚙️  WaterQuality
+2026-03-12 11:41:16 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:41:16] ⚙️  SoilVegetation
+2026-03-12 11:41:16 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:41:16] ⚙️  AlgaeBloom
+2026-03-12 11:41:16 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:41:16] ⚙️  WaterRatio
+2026-03-12 11:41:16 - wetland_monitor - INFO - perform_single_analysis:1003 - [11:41:16] ⚙️  Salinity
+2026-03-12 11:41:18 - wetland_monitor - INFO - perform_single_analysis:1034 - [Hydrology] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:41:20 - wetland_monitor - INFO - perform_single_analysis:1034 - [Vegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:41:20 - wetland_monitor - INFO - perform_single_analysis:1034 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:41:20 - wetland_monitor - INFO - perform_single_analysis:1034 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:41:21 - wetland_monitor - INFO - perform_single_analysis:1034 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:41:21 - wetland_monitor - INFO - perform_single_analysis:1034 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:41:23 - wetland_monitor - INFO - perform_single_analysis:1102 - [11:41:23] ✓  Hydrology completed
+2026-03-12 11:41:23 - wetland_monitor - INFO - analyze_all:1175 - Parallel Task Hydrology: Success
+2026-03-12 11:41:23 - wetland_monitor - INFO - perform_single_analysis:1034 - [Salinity] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 11:41:24 - wetland_monitor - INFO - perform_single_analysis:1102 - [11:41:24] ✓  Vegetation completed
+2026-03-12 11:41:24 - wetland_monitor - INFO - analyze_all:1175 - Parallel Task Vegetation: Success
+2026-03-12 11:41:25 - wetland_monitor - INFO - perform_single_analysis:1102 - [11:41:25] ✓  AlgaeBloom completed
+2026-03-12 11:41:25 - wetland_monitor - INFO - analyze_all:1175 - Parallel Task AlgaeBloom: Success
+2026-03-12 11:41:25 - wetland_monitor - INFO - perform_single_analysis:1102 - [11:41:25] ✓  WaterQuality completed
+2026-03-12 11:41:25 - wetland_monitor - INFO - analyze_all:1175 - Parallel Task WaterQuality: Success
+2026-03-12 11:41:26 - wetland_monitor - INFO - perform_single_analysis:1102 - [11:41:26] ✓  WaterRatio completed
+2026-03-12 11:41:26 - wetland_monitor - INFO - analyze_all:1175 - Parallel Task WaterRatio: Success
+2026-03-12 11:41:27 - wetland_monitor - INFO - perform_single_analysis:1102 - [11:41:27] ✓  SoilVegetation completed
+2026-03-12 11:41:27 - wetland_monitor - INFO - analyze_all:1175 - Parallel Task SoilVegetation: Success
+2026-03-12 11:41:28 - wetland_monitor - INFO - perform_single_analysis:1102 - [11:41:28] ✓  Salinity completed
+2026-03-12 11:41:28 - wetland_monitor - INFO - analyze_all:1175 - Parallel Task Salinity: Success
+2026-03-12 11:41:28 - wetland_monitor - INFO - analyze_all:1180 - [11:41:28]   
+2026-03-12 11:47:26 - wetland_monitor - WARNING - <module>:821 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 12:03:40 - wetland_monitor - INFO - process_spatial_file:1226 - Extracted KML from KMZ: doc.kml
+2026-03-12 12:03:46 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:03:46] ⚙️  Hydrology
+2026-03-12 12:03:46 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:03:46] ⚙️  Vegetation
+2026-03-12 12:03:46 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:03:46] ⚙️  WaterQuality
+2026-03-12 12:03:46 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:03:46] ⚙️  SoilVegetation
+2026-03-12 12:03:46 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:03:46] ⚙️  AlgaeBloom
+2026-03-12 12:03:46 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:03:46] ⚙️  WaterRatio
+2026-03-12 12:03:46 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:03:46] ⚙️  Salinity
+2026-03-12 12:03:48 - wetland_monitor - INFO - perform_single_analysis:1043 - [Hydrology] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:03:49 - wetland_monitor - INFO - perform_single_analysis:1043 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:03:50 - wetland_monitor - INFO - perform_single_analysis:1043 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:03:50 - wetland_monitor - INFO - perform_single_analysis:1043 - [Vegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:03:50 - wetland_monitor - INFO - perform_single_analysis:1043 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:03:50 - wetland_monitor - INFO - perform_single_analysis:1043 - [Salinity] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:03:51 - wetland_monitor - INFO - perform_single_analysis:1043 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:03:53 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:03:53] ✓  Hydrology completed
+2026-03-12 12:03:53 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task Hydrology: Success
+2026-03-12 12:03:54 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:03:54] ✓  AlgaeBloom completed
+2026-03-12 12:03:54 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task AlgaeBloom: Success
+2026-03-12 12:03:55 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:03:55] ✓  Vegetation completed
+2026-03-12 12:03:55 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:03:55] ✓  Salinity completed
+2026-03-12 12:03:55 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task Vegetation: Success
+2026-03-12 12:03:55 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task Salinity: Success
+2026-03-12 12:03:56 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:03:56] ✓  SoilVegetation completed
+2026-03-12 12:03:56 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task SoilVegetation: Success
+2026-03-12 12:03:56 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:03:56] ✓  WaterRatio completed
+2026-03-12 12:03:56 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task WaterRatio: Success
+2026-03-12 12:03:56 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:03:56] ✓  WaterQuality completed
+2026-03-12 12:03:56 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task WaterQuality: Success
+2026-03-12 12:03:56 - wetland_monitor - INFO - analyze_all:1189 - [12:03:56]   
+2026-03-12 12:04:25 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:04:25] ⚙️  Hydrology
+2026-03-12 12:04:25 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:04:25] ⚙️  Vegetation
+2026-03-12 12:04:25 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:04:25] ⚙️  WaterQuality
+2026-03-12 12:04:25 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:04:25] ⚙️  SoilVegetation
+2026-03-12 12:04:25 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:04:25] ⚙️  AlgaeBloom
+2026-03-12 12:04:25 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:04:25] ⚙️  WaterRatio
+2026-03-12 12:04:25 - wetland_monitor - INFO - perform_single_analysis:1012 - [12:04:25] ⚙️  Salinity
+2026-03-12 12:04:26 - wetland_monitor - INFO - perform_single_analysis:1043 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:04:26 - wetland_monitor - INFO - perform_single_analysis:1043 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:04:27 - wetland_monitor - INFO - perform_single_analysis:1043 - [Hydrology] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:04:27 - wetland_monitor - INFO - perform_single_analysis:1043 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:04:27 - wetland_monitor - INFO - perform_single_analysis:1043 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:04:27 - wetland_monitor - INFO - perform_single_analysis:1043 - [Vegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:04:27 - wetland_monitor - INFO - perform_single_analysis:1043 - [Salinity] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:04:32 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:04:32] ✓  Salinity completed
+2026-03-12 12:04:32 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task Salinity: Success
+2026-03-12 12:04:32 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:04:32] ✓  Vegetation completed
+2026-03-12 12:04:32 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task Vegetation: Success
+2026-03-12 12:04:33 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:04:33] ✓  AlgaeBloom completed
+2026-03-12 12:04:33 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:04:33] ✓  Hydrology completed
+2026-03-12 12:04:33 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task AlgaeBloom: Success
+2026-03-12 12:04:33 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task Hydrology: Success
+2026-03-12 12:04:33 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:04:33] ✓  SoilVegetation completed
+2026-03-12 12:04:33 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task SoilVegetation: Success
+2026-03-12 12:04:34 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:04:34] ✓  WaterQuality completed
+2026-03-12 12:04:34 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task WaterQuality: Success
+2026-03-12 12:04:38 - wetland_monitor - INFO - perform_single_analysis:1111 - [12:04:38] ✓  WaterRatio completed
+2026-03-12 12:04:38 - wetland_monitor - INFO - analyze_all:1184 - Parallel Task WaterRatio: Success
+2026-03-12 12:04:38 - wetland_monitor - INFO - analyze_all:1189 - [12:04:38]   
+2026-03-12 12:13:41 - wetland_monitor - WARNING - <module>:828 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 12:13:42 - wetland_monitor - INFO - generate_wetland_report:676 - Skipping index Vegetation in report: No signal or data (value: None)
+2026-03-12 12:13:42 - wetland_monitor - INFO - generate_wetland_report:676 - Skipping index Salinity in report: No signal or data (value: 0)
+2026-03-12 12:19:31 - wetland_monitor - WARNING - <module>:828 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 12:21:53 - wetland_monitor - INFO - process_spatial_file:1233 - Extracted KML from KMZ: doc.kml
+2026-03-12 12:21:57 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:21:57] ⚙️  Hydrology
+2026-03-12 12:21:57 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:21:57] ⚙️  Vegetation
+2026-03-12 12:21:57 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:21:57] ⚙️  WaterQuality
+2026-03-12 12:21:58 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:21:58] ⚙️  SoilVegetation
+2026-03-12 12:21:58 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:21:58] ⚙️  AlgaeBloom
+2026-03-12 12:21:58 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:21:58] ⚙️  WaterRatio
+2026-03-12 12:21:58 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:21:58] ⚙️  Salinity
+2026-03-12 12:21:59 - wetland_monitor - INFO - perform_single_analysis:1050 - [Hydrology] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:22:01 - wetland_monitor - INFO - perform_single_analysis:1050 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:22:02 - wetland_monitor - INFO - perform_single_analysis:1050 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:22:02 - wetland_monitor - INFO - perform_single_analysis:1050 - [Salinity] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:22:02 - wetland_monitor - INFO - perform_single_analysis:1050 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:22:02 - wetland_monitor - INFO - perform_single_analysis:1050 - [Vegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:22:03 - wetland_monitor - INFO - perform_single_analysis:1050 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:22:04 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:22:04] ✓  Hydrology completed
+2026-03-12 12:22:04 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task Hydrology: Success
+2026-03-12 12:22:06 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:22:06] ✓  WaterRatio completed
+2026-03-12 12:22:06 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task WaterRatio: Success
+2026-03-12 12:22:07 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:22:07] ✓  AlgaeBloom completed
+2026-03-12 12:22:07 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task AlgaeBloom: Success
+2026-03-12 12:22:07 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:22:07] ✓  SoilVegetation completed
+2026-03-12 12:22:07 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task SoilVegetation: Success
+2026-03-12 12:22:07 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:22:07] ✓  Salinity completed
+2026-03-12 12:22:07 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task Salinity: Success
+2026-03-12 12:22:08 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:22:08] ✓  Vegetation completed
+2026-03-12 12:22:08 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task Vegetation: Success
+2026-03-12 12:22:09 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:22:09] ✓  WaterQuality completed
+2026-03-12 12:22:09 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task WaterQuality: Success
+2026-03-12 12:22:09 - wetland_monitor - INFO - analyze_all:1196 - [12:22:09]   
+2026-03-12 12:23:18 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:23:18] ⚙️  Hydrology
+2026-03-12 12:23:18 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:23:18] ⚙️  Vegetation
+2026-03-12 12:23:18 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:23:18] ⚙️  WaterQuality
+2026-03-12 12:23:18 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:23:18] ⚙️  SoilVegetation
+2026-03-12 12:23:18 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:23:18] ⚙️  AlgaeBloom
+2026-03-12 12:23:18 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:23:18] ⚙️  WaterRatio
+2026-03-12 12:23:18 - wetland_monitor - INFO - perform_single_analysis:1019 - [12:23:18] ⚙️  Salinity
+2026-03-12 12:23:19 - wetland_monitor - INFO - perform_single_analysis:1050 - [Vegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:23:20 - wetland_monitor - INFO - perform_single_analysis:1050 - [Salinity] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:23:20 - wetland_monitor - INFO - perform_single_analysis:1050 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:23:20 - wetland_monitor - INFO - perform_single_analysis:1050 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:23:20 - wetland_monitor - INFO - perform_single_analysis:1050 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:23:20 - wetland_monitor - INFO - perform_single_analysis:1050 - [Hydrology] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:23:20 - wetland_monitor - INFO - perform_single_analysis:1050 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3663 days)
+2026-03-12 12:23:24 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:23:24] ✓  Salinity completed
+2026-03-12 12:23:24 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task Salinity: Success
+2026-03-12 12:23:24 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:23:24] ✓  SoilVegetation completed
+2026-03-12 12:23:24 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task SoilVegetation: Success
+2026-03-12 12:23:25 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:23:25] ✓  Vegetation completed
+2026-03-12 12:23:25 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task Vegetation: Success
+2026-03-12 12:23:25 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:23:25] ✓  WaterQuality completed
+2026-03-12 12:23:25 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task WaterQuality: Success
+2026-03-12 12:23:26 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:23:26] ✓  Hydrology completed
+2026-03-12 12:23:26 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task Hydrology: Success
+2026-03-12 12:23:26 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:23:26] ✓  WaterRatio completed
+2026-03-12 12:23:26 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task WaterRatio: Success
+2026-03-12 12:23:28 - wetland_monitor - INFO - perform_single_analysis:1118 - [12:23:28] ✓  AlgaeBloom completed
+2026-03-12 12:23:28 - wetland_monitor - INFO - analyze_all:1191 - Parallel Task AlgaeBloom: Success
+2026-03-12 12:23:28 - wetland_monitor - INFO - analyze_all:1196 - [12:23:28]   
+2026-03-12 15:24:04 - wetland_monitor - WARNING - <module>:828 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 15:44:09 - wetland_monitor - WARNING - <module>:828 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 16:41:57 - wetland_monitor - WARNING - <module>:828 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 16:48:26 - wetland_monitor - WARNING - <module>:828 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 16:48:31 - wetland_monitor - ERROR - ensure_ee_initialized:842 - Failed to initialize GEE: Caller does not have required permission to use project ee-wetlandmonitor. Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role with the serviceusage.services.use permission, by visiting https://console.developers.google.com/iam-admin/iam?project=ee-wetlandmonitor and then retry. Propagation of the new permission may take a few minutes.
+2026-03-12 16:48:31 - wetland_monitor - ERROR - debug_indices:1149 - Debug endpoint failed: Earth Engine initialization failed: Caller does not have required permission to use project ee-wetlandmonitor. Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role with the serviceusage.services.use permission, by visiting https://console.developers.google.com/iam-admin/iam?project=ee-wetlandmonitor and then retry. Propagation of the new permission may take a few minutes.
+2026-03-12 16:50:27 - wetland_monitor - WARNING - <module>:828 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-12 16:58:25 - wetland_monitor - INFO - perform_single_analysis:1019 - [16:58:25] ⚙️  Hydrology
+2026-03-12 16:58:25 - wetland_monitor - INFO - perform_single_analysis:1019 - [16:58:25] ⚙️  Vegetation
+2026-03-12 16:58:25 - wetland_monitor - INFO - perform_single_analysis:1019 - [16:58:25] ⚙️  WaterQuality
+2026-03-12 16:58:25 - wetland_monitor - INFO - perform_single_analysis:1019 - [16:58:25] ⚙️  SoilVegetation
+2026-03-12 16:58:25 - wetland_monitor - INFO - perform_single_analysis:1019 - [16:58:25] ⚙️  AlgaeBloom
+2026-03-12 16:58:25 - wetland_monitor - INFO - perform_single_analysis:1019 - [16:58:25] ⚙️  WaterRatio
+2026-03-12 16:58:25 - wetland_monitor - INFO - perform_single_analysis:1019 - [16:58:25] ⚙️  Salinity
+2026-03-13 07:26:33 - wetland_monitor - WARNING - <module>:828 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 08:08:28 - wetland_monitor - INFO - process_spatial_file:1275 - Extracted KML from KMZ: doc.kml
+2026-03-13 08:08:33 - wetland_monitor - INFO - perform_single_analysis:1019 - [08:08:33] ⚙️  Hydrology
+2026-03-13 08:08:33 - wetland_monitor - INFO - perform_single_analysis:1019 - [08:08:33] ⚙️  Vegetation
+2026-03-13 08:08:33 - wetland_monitor - INFO - perform_single_analysis:1019 - [08:08:33] ⚙️  WaterQuality
+2026-03-13 08:08:33 - wetland_monitor - INFO - perform_single_analysis:1019 - [08:08:33] ⚙️  SoilVegetation
+2026-03-13 08:08:33 - wetland_monitor - INFO - perform_single_analysis:1019 - [08:08:33] ⚙️  AlgaeBloom
+2026-03-13 08:08:33 - wetland_monitor - INFO - perform_single_analysis:1019 - [08:08:33] ⚙️  WaterRatio
+2026-03-13 08:08:33 - wetland_monitor - INFO - perform_single_analysis:1019 - [08:08:33] ⚙️  Salinity
+2026-03-13 08:08:35 - wetland_monitor - INFO - perform_single_analysis:1050 - [Vegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 08:08:38 - wetland_monitor - INFO - perform_single_analysis:1050 - [Hydrology] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 08:08:38 - wetland_monitor - INFO - perform_single_analysis:1050 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 08:08:38 - wetland_monitor - INFO - perform_single_analysis:1050 - [Salinity] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 08:08:38 - wetland_monitor - INFO - perform_single_analysis:1050 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 08:08:38 - wetland_monitor - INFO - perform_single_analysis:1050 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 08:08:39 - wetland_monitor - INFO - perform_single_analysis:1050 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 08:08:43 - wetland_monitor - INFO - perform_single_analysis:1133 - [08:08:43] ✓  Vegetation completed
+2026-03-13 08:08:43 - wetland_monitor - INFO - analyze_all:1233 - Parallel Task Vegetation: Success
+2026-03-13 08:08:44 - wetland_monitor - INFO - perform_single_analysis:1133 - [08:08:44] ✓  Hydrology completed
+2026-03-13 08:08:44 - wetland_monitor - INFO - analyze_all:1233 - Parallel Task Hydrology: Success
+2026-03-13 08:08:45 - wetland_monitor - INFO - perform_single_analysis:1133 - [08:08:45] ✓  SoilVegetation completed
+2026-03-13 08:08:45 - wetland_monitor - INFO - analyze_all:1233 - Parallel Task SoilVegetation: Success
+2026-03-13 08:08:45 - wetland_monitor - INFO - perform_single_analysis:1133 - [08:08:45] ✓  Salinity completed
+2026-03-13 08:08:45 - wetland_monitor - INFO - analyze_all:1233 - Parallel Task Salinity: Success
+2026-03-13 08:08:45 - wetland_monitor - INFO - perform_single_analysis:1133 - [08:08:45] ✓  WaterQuality completed
+2026-03-13 08:08:45 - wetland_monitor - INFO - analyze_all:1233 - Parallel Task WaterQuality: Success
+2026-03-13 08:08:46 - wetland_monitor - INFO - perform_single_analysis:1133 - [08:08:46] ✓  AlgaeBloom completed
+2026-03-13 08:08:46 - wetland_monitor - INFO - analyze_all:1233 - Parallel Task AlgaeBloom: Success
+2026-03-13 08:08:47 - wetland_monitor - INFO - perform_single_analysis:1133 - [08:08:47] ✓  WaterRatio completed
+2026-03-13 08:08:47 - wetland_monitor - INFO - analyze_all:1233 - Parallel Task WaterRatio: Success
+2026-03-13 08:08:47 - wetland_monitor - INFO - analyze_all:1238 - [08:08:47]   
+2026-03-13 08:29:38 - wetland_monitor - WARNING - <module>:878 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 08:29:45 - wetland_monitor - INFO - debug_indices:1153 - --- INTERNAL DEBUG ANALYSIS: Hydrology ---
+2026-03-13 08:30:14 - wetland_monitor - INFO - debug_indices:1153 - --- INTERNAL DEBUG ANALYSIS: Hydrology ---
+2026-03-13 08:30:45 - wetland_monitor - INFO - debug_indices:1153 - --- INTERNAL DEBUG ANALYSIS: Hydrology ---
+2026-03-13 08:32:58 - wetland_monitor - WARNING - <module>:878 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 08:33:02 - wetland_monitor - ERROR - ensure_ee_initialized:892 - Failed to initialize GEE: Caller does not have required permission to use project ee-wetlandmonitor. Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role with the serviceusage.services.use permission, by visiting https://console.developers.google.com/iam-admin/iam?project=ee-wetlandmonitor and then retry. Propagation of the new permission may take a few minutes.
+2026-03-13 08:33:02 - wetland_monitor - ERROR - debug_indices:1222 - Debug endpoint failed: Earth Engine initialization failed: Caller does not have required permission to use project ee-wetlandmonitor. Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role with the serviceusage.services.use permission, by visiting https://console.developers.google.com/iam-admin/iam?project=ee-wetlandmonitor and then retry. Propagation of the new permission may take a few minutes.
+2026-03-13 08:37:38 - wetland_monitor - WARNING - <module>:878 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 08:37:42 - wetland_monitor - ERROR - ensure_ee_initialized:892 - Failed to initialize GEE: Project 'projects/ee-jonathanubo' not found or deleted.
+2026-03-13 08:37:42 - wetland_monitor - ERROR - debug_indices:1221 - Debug endpoint failed: Earth Engine initialization failed: Project 'projects/ee-jonathanubo' not found or deleted.
+2026-03-13 08:49:51 - wetland_monitor - WARNING - <module>:878 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 08:49:56 - wetland_monitor - ERROR - ensure_ee_initialized:892 - Failed to initialize GEE: Caller does not have required permission to use project ee-wetlandmonitor. Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role with the serviceusage.services.use permission, by visiting https://console.developers.google.com/iam-admin/iam?project=ee-wetlandmonitor and then retry. Propagation of the new permission may take a few minutes.
+2026-03-13 08:49:56 - wetland_monitor - ERROR - debug_indices:1221 - Debug endpoint failed: Earth Engine initialization failed: Caller does not have required permission to use project ee-wetlandmonitor. Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role with the serviceusage.services.use permission, by visiting https://console.developers.google.com/iam-admin/iam?project=ee-wetlandmonitor and then retry. Propagation of the new permission may take a few minutes.
+2026-03-13 08:53:44 - wetland_monitor - WARNING - <module>:878 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 09:02:58 - wetland_monitor - INFO - process_spatial_file:1332 - Extracted KML from KMZ: doc.kml
+2026-03-13 09:03:02 - wetland_monitor - INFO - perform_single_analysis:1069 - [09:03:02] ⚙️  Hydrology
+2026-03-13 09:03:02 - wetland_monitor - INFO - perform_single_analysis:1069 - [09:03:02] ⚙️  Vegetation
+2026-03-13 09:03:02 - wetland_monitor - INFO - perform_single_analysis:1069 - [09:03:02] ⚙️  WaterQuality
+2026-03-13 09:03:02 - wetland_monitor - INFO - perform_single_analysis:1069 - [09:03:02] ⚙️  SoilVegetation
+2026-03-13 09:03:03 - wetland_monitor - INFO - perform_single_analysis:1069 - [09:03:03] ⚙️  AlgaeBloom
+2026-03-13 09:03:03 - wetland_monitor - INFO - perform_single_analysis:1069 - [09:03:03] ⚙️  WaterRatio
+2026-03-13 09:03:03 - wetland_monitor - INFO - perform_single_analysis:1069 - [09:03:03] ⚙️  Salinity
+2026-03-13 09:03:04 - wetland_monitor - INFO - perform_single_analysis:1100 - [Hydrology] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:03:07 - wetland_monitor - INFO - perform_single_analysis:1100 - [Vegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:03:07 - wetland_monitor - INFO - perform_single_analysis:1100 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:03:07 - wetland_monitor - INFO - perform_single_analysis:1100 - [Salinity] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:03:07 - wetland_monitor - INFO - perform_single_analysis:1100 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:03:07 - wetland_monitor - INFO - perform_single_analysis:1100 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:03:07 - wetland_monitor - INFO - perform_single_analysis:1100 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:03:12 - wetland_monitor - WARNING - calculate_spatial_consistency:292 - Spatial consistency calculation failed: Dictionary.get: Dictionary does not contain key: 'Value_sum'.
+2026-03-13 09:03:12 - wetland_monitor - INFO - perform_single_analysis:1186 - [09:03:12] ✓  Hydrology completed
+2026-03-13 09:03:12 - wetland_monitor - INFO - analyze_all:1290 - Parallel Task Hydrology: Success
+2026-03-13 09:03:17 - wetland_monitor - WARNING - calculate_spatial_consistency:292 - Spatial consistency calculation failed: Dictionary.get: Dictionary does not contain key: 'Value_sum'.
+2026-03-13 09:03:17 - wetland_monitor - INFO - perform_single_analysis:1186 - [09:03:17] ✓  SoilVegetation completed
+2026-03-13 09:03:17 - wetland_monitor - INFO - analyze_all:1290 - Parallel Task SoilVegetation: Success
+2026-03-13 09:03:18 - wetland_monitor - WARNING - calculate_spatial_consistency:292 - Spatial consistency calculation failed: Dictionary.get: Dictionary does not contain key: 'Value_sum'.
+2026-03-13 09:03:18 - wetland_monitor - INFO - perform_single_analysis:1186 - [09:03:18] ✓  Salinity completed
+2026-03-13 09:03:18 - wetland_monitor - INFO - analyze_all:1290 - Parallel Task Salinity: Success
+2026-03-13 09:03:18 - wetland_monitor - WARNING - calculate_spatial_consistency:292 - Spatial consistency calculation failed: Dictionary.get: Dictionary does not contain key: 'Value_sum'.
+2026-03-13 09:03:18 - wetland_monitor - INFO - perform_single_analysis:1186 - [09:03:18] ✓  WaterQuality completed
+2026-03-13 09:03:18 - wetland_monitor - INFO - analyze_all:1290 - Parallel Task WaterQuality: Success
+2026-03-13 09:03:18 - wetland_monitor - WARNING - calculate_spatial_consistency:292 - Spatial consistency calculation failed: Dictionary.get: Dictionary does not contain key: 'Value_sum'.
+2026-03-13 09:03:18 - wetland_monitor - INFO - perform_single_analysis:1186 - [09:03:18] ✓  Vegetation completed
+2026-03-13 09:03:18 - wetland_monitor - INFO - analyze_all:1290 - Parallel Task Vegetation: Success
+2026-03-13 09:03:18 - wetland_monitor - WARNING - calculate_spatial_consistency:292 - Spatial consistency calculation failed: Dictionary.get: Dictionary does not contain key: 'Value_sum'.
+2026-03-13 09:03:18 - wetland_monitor - INFO - perform_single_analysis:1186 - [09:03:18] ✓  AlgaeBloom completed
+2026-03-13 09:03:18 - wetland_monitor - INFO - analyze_all:1290 - Parallel Task AlgaeBloom: Success
+2026-03-13 09:03:19 - wetland_monitor - WARNING - calculate_spatial_consistency:292 - Spatial consistency calculation failed: Dictionary.get: Dictionary does not contain key: 'Value_sum'.
+2026-03-13 09:03:20 - wetland_monitor - INFO - perform_single_analysis:1186 - [09:03:20] ✓  WaterRatio completed
+2026-03-13 09:03:20 - wetland_monitor - INFO - analyze_all:1290 - Parallel Task WaterRatio: Success
+2026-03-13 09:03:20 - wetland_monitor - INFO - analyze_all:1295 - [09:03:20]   
+2026-03-13 09:03:36 - wetland_monitor - ERROR - generate_report:1418 - Report Error: name 'get_index_status_message' is not defined
+2026-03-13 09:14:14 - wetland_monitor - WARNING - <module>:877 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 09:14:33 - wetland_monitor - ERROR - ensure_ee_initialized:891 - Failed to initialize GEE: Caller does not have required permission to use project ee-wetlandmonitor. Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role with the serviceusage.services.use permission, by visiting https://console.developers.google.com/iam-admin/iam?project=ee-wetlandmonitor and then retry. Propagation of the new permission may take a few minutes.
+2026-03-13 09:14:33 - wetland_monitor - ERROR - debug_indices:1220 - Debug endpoint failed: Earth Engine initialization failed: Caller does not have required permission to use project ee-wetlandmonitor. Grant the caller the roles/serviceusage.serviceUsageConsumer role, or a custom role with the serviceusage.services.use permission, by visiting https://console.developers.google.com/iam-admin/iam?project=ee-wetlandmonitor and then retry. Propagation of the new permission may take a few minutes.
+2026-03-13 09:26:45 - wetland_monitor - INFO - process_spatial_file:1331 - Extracted KML from KMZ: doc.kml
+2026-03-13 09:27:22 - wetland_monitor - INFO - perform_single_analysis:1068 - [09:27:22] ⚙️  Hydrology
+2026-03-13 09:27:22 - wetland_monitor - INFO - perform_single_analysis:1068 - [09:27:22] ⚙️  Vegetation
+2026-03-13 09:27:22 - wetland_monitor - INFO - perform_single_analysis:1068 - [09:27:22] ⚙️  WaterQuality
+2026-03-13 09:27:22 - wetland_monitor - INFO - perform_single_analysis:1068 - [09:27:22] ⚙️  SoilVegetation
+2026-03-13 09:27:22 - wetland_monitor - INFO - perform_single_analysis:1068 - [09:27:22] ⚙️  AlgaeBloom
+2026-03-13 09:27:22 - wetland_monitor - INFO - perform_single_analysis:1068 - [09:27:22] ⚙️  WaterRatio
+2026-03-13 09:27:22 - wetland_monitor - INFO - perform_single_analysis:1068 - [09:27:22] ⚙️  Salinity
+2026-03-13 09:27:23 - wetland_monitor - INFO - perform_single_analysis:1099 - [Hydrology] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:27:26 - wetland_monitor - INFO - perform_single_analysis:1099 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:27:26 - wetland_monitor - INFO - perform_single_analysis:1099 - [Vegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:27:26 - wetland_monitor - INFO - perform_single_analysis:1099 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:27:26 - wetland_monitor - INFO - perform_single_analysis:1099 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:27:27 - wetland_monitor - INFO - perform_single_analysis:1099 - [Salinity] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:27:27 - wetland_monitor - INFO - perform_single_analysis:1099 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 09:27:29 - wetland_monitor - INFO - perform_single_analysis:1185 - [09:27:29] ✓  Hydrology completed
+2026-03-13 09:27:29 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Hydrology: Success
+2026-03-13 09:27:32 - wetland_monitor - INFO - perform_single_analysis:1185 - [09:27:32] ✓  Vegetation completed
+2026-03-13 09:27:32 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Vegetation: Success
+2026-03-13 09:27:33 - wetland_monitor - INFO - perform_single_analysis:1185 - [09:27:33] ✓  WaterRatio completed
+2026-03-13 09:27:33 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task WaterRatio: Success
+2026-03-13 09:27:33 - wetland_monitor - INFO - perform_single_analysis:1185 - [09:27:33] ✓  SoilVegetation completed
+2026-03-13 09:27:33 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task SoilVegetation: Success
+2026-03-13 09:27:34 - wetland_monitor - INFO - perform_single_analysis:1185 - [09:27:34] ✓  Salinity completed
+2026-03-13 09:27:34 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Salinity: Success
+2026-03-13 09:27:35 - wetland_monitor - INFO - perform_single_analysis:1185 - [09:27:35] ✓  WaterQuality completed
+2026-03-13 09:27:35 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task WaterQuality: Success
+2026-03-13 09:27:38 - wetland_monitor - INFO - perform_single_analysis:1185 - [09:27:38] ✓  AlgaeBloom completed
+2026-03-13 09:27:38 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task AlgaeBloom: Success
+2026-03-13 09:27:38 - wetland_monitor - INFO - analyze_all:1294 - [09:27:38]   
+2026-03-13 09:40:20 - wetland_monitor - WARNING - <module>:877 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 09:49:36 - wetland_monitor - WARNING - <module>:877 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 09:59:26 - wetland_monitor - WARNING - <module>:877 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 10:20:13 - wetland_monitor - INFO - generate_report:1403 - Generating report for: Poligono 1.kmz
+2026-03-13 10:21:11 - wetland_monitor - INFO - generate_report:1418 - Report generated successfully: Reporte_Poligono_1.kmz_2026-03-13.docx
+2026-03-13 10:22:20 - wetland_monitor - INFO - process_spatial_file:1331 - Extracted KML from KMZ: doc.kml
+2026-03-13 10:22:57 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:22:57] ⚙️  Hydrology
+2026-03-13 10:22:57 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:22:57] ⚙️  Vegetation
+2026-03-13 10:22:57 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:22:57] ⚙️  WaterQuality
+2026-03-13 10:22:57 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:22:57] ⚙️  SoilVegetation
+2026-03-13 10:22:57 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:22:57] ⚙️  AlgaeBloom
+2026-03-13 10:22:57 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:22:57] ⚙️  WaterRatio
+2026-03-13 10:22:57 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:22:57] ⚙️  Salinity
+2026-03-13 10:22:59 - wetland_monitor - INFO - perform_single_analysis:1099 - [Hydrology] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:23:01 - wetland_monitor - INFO - perform_single_analysis:1099 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:23:01 - wetland_monitor - INFO - perform_single_analysis:1099 - [Salinity] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:23:01 - wetland_monitor - INFO - perform_single_analysis:1099 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:23:01 - wetland_monitor - INFO - perform_single_analysis:1099 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:23:02 - wetland_monitor - INFO - perform_single_analysis:1099 - [Vegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:23:02 - wetland_monitor - INFO - perform_single_analysis:1099 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:23:08 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:23:08] ✓  Hydrology completed
+2026-03-13 10:23:08 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Hydrology: Success
+2026-03-13 10:23:09 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:23:09] ✓  SoilVegetation completed
+2026-03-13 10:23:09 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task SoilVegetation: Success
+2026-03-13 10:23:09 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:23:09] ✓  Salinity completed
+2026-03-13 10:23:09 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Salinity: Success
+2026-03-13 10:23:10 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:23:10] ✓  Vegetation completed
+2026-03-13 10:23:10 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Vegetation: Success
+2026-03-13 10:23:11 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:23:11] ✓  WaterQuality completed
+2026-03-13 10:23:11 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task WaterQuality: Success
+2026-03-13 10:23:12 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:23:12] ✓  AlgaeBloom completed
+2026-03-13 10:23:12 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task AlgaeBloom: Success
+2026-03-13 10:23:21 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:23:21] ✓  WaterRatio completed
+2026-03-13 10:23:21 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task WaterRatio: Success
+2026-03-13 10:23:21 - wetland_monitor - INFO - analyze_all:1294 - [10:23:21]   
+2026-03-13 10:23:42 - wetland_monitor - INFO - generate_report:1403 - Generating report for: Poligono 1.kmz
+2026-03-13 10:24:46 - wetland_monitor - INFO - generate_report:1418 - Report generated successfully: Reporte_Poligono_1.kmz_2026-03-13.docx
+2026-03-13 10:37:20 - wetland_monitor - INFO - process_spatial_file:1331 - Extracted KML from KMZ: doc.kml
+2026-03-13 10:37:32 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:37:32] ⚙️  Hydrology
+2026-03-13 10:37:32 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:37:32] ⚙️  Vegetation
+2026-03-13 10:37:32 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:37:32] ⚙️  WaterQuality
+2026-03-13 10:37:32 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:37:32] ⚙️  SoilVegetation
+2026-03-13 10:37:32 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:37:32] ⚙️  AlgaeBloom
+2026-03-13 10:37:32 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:37:32] ⚙️  WaterRatio
+2026-03-13 10:37:32 - wetland_monitor - INFO - perform_single_analysis:1068 - [10:37:32] ⚙️  Salinity
+2026-03-13 10:37:34 - wetland_monitor - INFO - perform_single_analysis:1099 - [Hydrology] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:37:36 - wetland_monitor - INFO - perform_single_analysis:1099 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:37:36 - wetland_monitor - INFO - perform_single_analysis:1099 - [Salinity] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:37:36 - wetland_monitor - INFO - perform_single_analysis:1099 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:37:36 - wetland_monitor - INFO - perform_single_analysis:1099 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:37:37 - wetland_monitor - INFO - perform_single_analysis:1099 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:37:40 - wetland_monitor - INFO - perform_single_analysis:1099 - [Vegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:37:42 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:37:42] ✓  Salinity completed
+2026-03-13 10:37:42 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Salinity: Success
+2026-03-13 10:37:42 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:37:42] ✓  WaterRatio completed
+2026-03-13 10:37:42 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task WaterRatio: Success
+2026-03-13 10:37:43 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:37:43] ✓  Hydrology completed
+2026-03-13 10:37:43 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Hydrology: Success
+2026-03-13 10:37:44 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:37:44] ✓  AlgaeBloom completed
+2026-03-13 10:37:44 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task AlgaeBloom: Success
+2026-03-13 10:37:45 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:37:45] ✓  SoilVegetation completed
+2026-03-13 10:37:45 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task SoilVegetation: Success
+2026-03-13 10:37:45 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:37:45] ✓  WaterQuality completed
+2026-03-13 10:37:45 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task WaterQuality: Success
+2026-03-13 10:37:48 - wetland_monitor - INFO - perform_single_analysis:1185 - [10:37:48] ✓  Vegetation completed
+2026-03-13 10:37:48 - wetland_monitor - INFO - analyze_all:1289 - Parallel Task Vegetation: Success
+2026-03-13 10:37:48 - wetland_monitor - INFO - analyze_all:1294 - [10:37:48]   
+2026-03-13 10:38:04 - wetland_monitor - INFO - generate_report:1403 - Generating report for: Poligono 1.kmz
+2026-03-13 10:38:56 - wetland_monitor - INFO - generate_report:1418 - Report generated successfully: Reporte_Poligono_1.kmz_2026-03-13.docx
+2026-03-13 10:41:34 - wetland_monitor - WARNING - <module>:935 - Global GEE init failed. Will attempt per-request initialization.
+2026-03-13 10:43:08 - wetland_monitor - INFO - process_spatial_file:1389 - Extracted KML from KMZ: doc.kml
+2026-03-13 10:43:17 - wetland_monitor - INFO - perform_single_analysis:1126 - [10:43:17] ⚙️  Hydrology
+2026-03-13 10:43:17 - wetland_monitor - INFO - perform_single_analysis:1126 - [10:43:17] ⚙️  Vegetation
+2026-03-13 10:43:17 - wetland_monitor - INFO - perform_single_analysis:1126 - [10:43:17] ⚙️  WaterQuality
+2026-03-13 10:43:17 - wetland_monitor - INFO - perform_single_analysis:1126 - [10:43:17] ⚙️  SoilVegetation
+2026-03-13 10:43:17 - wetland_monitor - INFO - perform_single_analysis:1126 - [10:43:17] ⚙️  AlgaeBloom
+2026-03-13 10:43:17 - wetland_monitor - INFO - perform_single_analysis:1126 - [10:43:17] ⚙️  WaterRatio
+2026-03-13 10:43:17 - wetland_monitor - INFO - perform_single_analysis:1126 - [10:43:17] ⚙️  Salinity
+2026-03-13 10:43:19 - wetland_monitor - INFO - perform_single_analysis:1157 - [Hydrology] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:43:21 - wetland_monitor - INFO - perform_single_analysis:1157 - [SoilVegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:43:21 - wetland_monitor - INFO - perform_single_analysis:1157 - [WaterRatio] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:43:21 - wetland_monitor - INFO - perform_single_analysis:1157 - [Vegetation] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:43:21 - wetland_monitor - INFO - perform_single_analysis:1157 - [Salinity] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:43:21 - wetland_monitor - INFO - perform_single_analysis:1157 - [AlgaeBloom] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:43:22 - wetland_monitor - INFO - perform_single_analysis:1157 - [WaterQuality] Using Historical Baseline for statistics (Long range: 3664 days)
+2026-03-13 10:43:24 - wetland_monitor - INFO - perform_single_analysis:1243 - [10:43:24] ✓  Hydrology completed
+2026-03-13 10:43:24 - wetland_monitor - INFO - analyze_all:1347 - Parallel Task Hydrology: Success
+2026-03-13 10:43:26 - wetland_monitor - INFO - perform_single_analysis:1243 - [10:43:26] ✓  SoilVegetation completed
+2026-03-13 10:43:26 - wetland_monitor - INFO - analyze_all:1347 - Parallel Task SoilVegetation: Success
+2026-03-13 10:43:27 - wetland_monitor - INFO - perform_single_analysis:1243 - [10:43:27] ✓  AlgaeBloom completed
+2026-03-13 10:43:27 - wetland_monitor - INFO - analyze_all:1347 - Parallel Task AlgaeBloom: Success
+2026-03-13 10:43:27 - wetland_monitor - INFO - perform_single_analysis:1243 - [10:43:27] ✓  WaterRatio completed
+2026-03-13 10:43:27 - wetland_monitor - INFO - analyze_all:1347 - Parallel Task WaterRatio: Success
+2026-03-13 10:43:29 - wetland_monitor - INFO - perform_single_analysis:1243 - [10:43:29] ✓  WaterQuality completed
+2026-03-13 10:43:29 - wetland_monitor - INFO - analyze_all:1347 - Parallel Task WaterQuality: Success
+2026-03-13 10:43:30 - wetland_monitor - INFO - perform_single_analysis:1243 - [10:43:30] ✓  Vegetation completed
+2026-03-13 10:43:30 - wetland_monitor - INFO - analyze_all:1347 - Parallel Task Vegetation: Success
+2026-03-13 10:43:30 - wetland_monitor - INFO - perform_single_analysis:1243 - [10:43:30] ✓  Salinity completed
+2026-03-13 10:43:30 - wetland_monitor - INFO - analyze_all:1347 - Parallel Task Salinity: Success
+2026-03-13 10:43:30 - wetland_monitor - INFO - analyze_all:1352 - [10:43:30]   
+2026-03-13 10:44:39 - wetland_monitor - INFO - generate_report:1461 - Generating report for: Poligono 1.kmz
+2026-03-13 10:45:34 - wetland_monitor - INFO - generate_report:1476 - Report generated successfully: Reporte_Poligono_1.kmz_2026-03-13.docx

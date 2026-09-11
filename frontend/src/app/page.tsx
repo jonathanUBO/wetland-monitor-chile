@@ -294,6 +294,31 @@ const LEGENDS: any = {
     }
 };
 
+// SATELLITE BASEMAP STYLE (High-Resolution Global Imagery via ESRI)
+const SATELLITE_MAP_STYLE: any = {
+    version: 8,
+    sources: {
+        'esri-satellite': {
+            type: 'raster',
+            tiles: [
+                'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+            ],
+            tileSize: 256,
+            maxzoom: 19,
+            attribution: 'Esri, Maxar, Earthstar Geographics'
+        }
+    },
+    layers: [
+        {
+            id: 'esri-satellite-layer',
+            type: 'raster',
+            source: 'esri-satellite',
+            minzoom: 0,
+            maxzoom: 19
+        }
+    ]
+};
+
 interface IndexCardProps {
     key?: string | number;
     mode: any;
@@ -303,9 +328,10 @@ interface IndexCardProps {
     onMove: (evt: any) => void;
     viewYear: 'start' | 'end';
     boundaryGeometry?: any;
+    mapMode?: 'satellite' | 'dark';
 }
 
-const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeometry }: IndexCardProps) => {
+const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeometry, mapMode = 'satellite' }: IndexCardProps) => {
 
     // Memoize the GeoJSON FeatureCollection for the wetland perimeter
     const boundaryGeoJson = React.useMemo(() => {
@@ -431,7 +457,7 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                     onMove={onMove}
                     mapLib={maplibregl as any}
                     style={{ width: '100%', height: '100%' }}
-                    mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+                    mapStyle={mapMode === 'dark' ? "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" : SATELLITE_MAP_STYLE}
                     attributionControl={false}
                     reuseMaps={true}
                     onIdle={bringBoundaryToFront}
@@ -581,6 +607,9 @@ export default function Dashboard() {
 
     // Global View State (Start vs End Year)
     const [viewYear, setViewYear] = useState<'start' | 'end'>('end');
+
+    // Basemap Mode: Satellite (ESRI) vs Dark
+    const [mapMode, setMapMode] = useState<'satellite' | 'dark'>('satellite');
 
     // Shared Map State (Center)
     const [viewState, setViewState] = useState({
@@ -1502,6 +1531,32 @@ export default function Dashboard() {
                             <span>Visión Total</span>
                         </button>
 
+                        {/* SELECTOR MAPA BASE (SATELITAL / OSCURO) */}
+                        <div className="flex items-center bg-black/70 border border-white/10 rounded-lg p-0.5 text-xs">
+                            <button
+                                onClick={() => setMapMode('satellite')}
+                                className={`px-2.5 py-0.5 rounded-md transition-all text-[11px] flex items-center gap-1 ${
+                                    mapMode === 'satellite'
+                                        ? 'bg-emerald-600 text-white font-semibold shadow-[0_0_10px_rgba(16,185,129,0.4)]'
+                                        : 'text-gray-400 hover:text-white'
+                                }`}
+                                title="Mapa base satelital de alta resolución"
+                            >
+                                🛰️ Satelital
+                            </button>
+                            <button
+                                onClick={() => setMapMode('dark')}
+                                className={`px-2.5 py-0.5 rounded-md transition-all text-[11px] flex items-center gap-1 ${
+                                    mapMode === 'dark'
+                                        ? 'bg-purple-600 text-white font-semibold shadow-[0_0_10px_rgba(147,51,234,0.4)]'
+                                        : 'text-gray-400 hover:text-white'
+                                }`}
+                                title="Mapa base oscuro de alto contraste"
+                            >
+                                🌑 Oscuro
+                            </button>
+                        </div>
+
                         {/* SELECTOR PERÍODO COMPARATIVO (START / END YEAR) */}
                         <div className="flex items-center bg-black/70 border border-white/10 rounded-lg p-0.5 text-xs">
                             <button
@@ -1547,6 +1602,7 @@ export default function Dashboard() {
                             onMove={evt => setViewState(evt.viewState)}
                             viewYear={viewYear}
                             boundaryGeometry={activeGeometry}
+                            mapMode={mapMode}
                         />
                     ))}
                 </div>

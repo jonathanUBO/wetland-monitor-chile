@@ -381,7 +381,7 @@ def fetch_thumbnail_bytes(mode: str, start_date: str, end_date: str, geometry: O
         import shapely.geometry as sg
         geom = sg.shape(geometry)
         bounds = list(geom.bounds)
-        content = get_overlay_bytes(mode, start_date, end_date, bounds)
+        content = get_overlay_bytes(mode, start_date, end_date, bounds, geometry=geometry)
         if content and len(content) >= 500:
             return io.BytesIO(content)
         return None
@@ -1093,6 +1093,11 @@ def generate_map_url(aoi, start, end, mode, wetland_name=None):
             [minx, miny]
         ]
         bbox_str = f"{minx:.6f},{miny:.6f},{maxx:.6f},{maxy:.6f}"
+        if aoi:
+            geom_obj = aoi.get("geometry", aoi) if isinstance(aoi, dict) else aoi
+            _aoi_geometry_cache[bbox_str] = geom_obj
+            if wetland_name:
+                _aoi_geometry_cache[wetland_name] = geom_obj
     except Exception:
         overlay_coords = None
 
@@ -1247,13 +1252,18 @@ async def analyze(request: AnalysisRequest, authorization: str = Header(None)):
 # ==========================================
 _tile_cache: Dict[str, bytes] = {}
 _overlay_cache: Dict[str, bytes] = {}
+_aoi_geometry_cache: Dict[str, dict] = {}
 _cache_lock = threading.Lock()
 _inflight_overlays: Dict[str, threading.Event] = {}
 _MAX_CACHE_SIZE = 3000
 
-def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[float]) -> Optional[bytes]:
-    """Fetch or retrieve from RAM cache a high-speed BBOX composite PNG."""
-    cache_key = f"{mode}_{start_date[:10]}_{end_date[:10]}_{bounds[0]:.4f}_{bounds[1]:.4f}_{bounds[2]:.4f}_{bounds[3]:.4f}"
+def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[float], geometry: Optional[dict] = None) -> Optional[bytes]:
+    """Fetch or retrieve from RAM cache a high-speed BBOX composite PNG.
+    If geometry is provided and mode != 'RGB', clips the index to the exact wetland polygon,
+    leaving pixels outside the wetland 100% transparent.
+    """
+    has_geom = bool(geometry and mode != "RGB")
+    cache_key = f"{mode}_{start_date[:10]}_{end_date[:10]}_{bounds[0]:.4f}_{bounds[1]:.4f}_{bounds[2]:.4f}_{bounds[3]:.4f}_{'clipped' if has_geom else 'full'}"
     
     with _cache_lock:
         if cache_key in _overlay_cache:
@@ -1288,12 +1298,23 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
             height = 768
             width = max(128, min(768, int(768 * aspect)))
 
+        bounds_payload: Dict[str, Any] = {
+            "bbox": bounds,
+            "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+        }
+        if geometry and mode != "RGB":
+            g = geometry
+            if isinstance(g, dict):
+                if g.get("type") == "Feature":
+                    g = g.get("geometry")
+                elif g.get("type") == "FeatureCollection" and g.get("features"):
+                    g = g["features"][0].get("geometry")
+            if g and isinstance(g, dict) and g.get("type") in ("Polygon", "MultiPolygon"):
+                bounds_payload["geometry"] = g
+
         payload = {
             "input": {
-                "bounds": {
-                    "bbox": bounds,
-                    "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
-                },
+                "bounds": bounds_payload,
                 "data": [{
                     "type": "sentinel-2-l2a",
                     "dataFilter": {
@@ -1318,7 +1339,17 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
             timeout=25
         )
         
-        # Fallback 1: if the date window has 0 acquisitions with strictly 0.00% cloud cover
+        # Fallback 1: if geometry caused an API error, retry with bbox only
+        if resp.status_code != 200 and "geometry" in payload["input"]["bounds"]:
+            payload["input"]["bounds"].pop("geometry", None)
+            resp = http_session.post(
+                "https://sh.dataspace.copernicus.eu/api/v1/process",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=25
+            )
+
+        # Fallback 2: if 0% cloud cover returned no scenes, retry with 15%
         if resp.status_code != 200 or not resp.content or len(resp.content) < 800:
             payload["input"]["data"][0]["dataFilter"]["maxCloudCoverage"] = 15
             resp = http_session.post(
@@ -1328,7 +1359,7 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
                 timeout=25
             )
 
-        # Fallback 2: if still no acquisitions found, relax to leastCC across all available imagery
+        # Fallback 3: if still no acquisitions found, relax to leastCC across all available imagery
         if resp.status_code != 200 or not resp.content or len(resp.content) < 800:
             payload["input"]["data"][0]["dataFilter"].pop("maxCloudCoverage", None)
             resp = http_session.post(
@@ -1363,19 +1394,23 @@ async def analyze_all(request: AnalysisRequest, authorization: str = Header(None
         modes = ["Hydrology", "Vegetation", "WaterQuality", "SoilVegetation", "AlgaeBloom", "WaterRatio"]
         
         # Concurrent pre-fetch of overlays in background ThreadPool:
-        # Pre-loads RGB + all 6 modes in RAM so frontend gets them in <5ms
+        # Pre-loads RGB + all 6 modes in RAM with geometry clipping so frontend gets them in <5ms
         try:
             import shapely.geometry as sg
             aoi_dict = request.geojson.get("geometry") or request.geojson
             aoi_geom = sg.shape(aoi_dict)
             aoi_bounds = list(aoi_geom.bounds)
+            bbox_key = f"{aoi_bounds[0]:.6f},{aoi_bounds[1]:.6f},{aoi_bounds[2]:.6f},{aoi_bounds[3]:.6f}"
+            _aoi_geometry_cache[bbox_key] = aoi_dict
+            if request.wetlandName:
+                _aoi_geometry_cache[request.wetlandName] = aoi_dict
             
             end_dt = datetime.strptime(request.endDate[:10], "%Y-%m-%d")
             ey_start = (end_dt - relativedelta(years=1)).strftime("%Y-%m-%d")
             
             prefetch_modes = ["RGB"] + modes
             def _prefetch_task(m):
-                get_overlay_bytes(m, ey_start, request.endDate, aoi_bounds)
+                get_overlay_bytes(m, ey_start, request.endDate, aoi_bounds, geometry=aoi_dict)
                 
             prefetch_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
             for m in prefetch_modes:
@@ -1402,30 +1437,38 @@ async def get_overlay(
     bbox: Optional[str] = None
 ):
     """Serve a high-speed georeferenced composite PNG covering the wetland bounding box.
-    Returns Cache-Control headers for instant client-side rendering.
+    If wetland or bbox geometry is known, clips the index overlay to the exact wetland perimeter.
     """
     bounds = None
-    if bbox:
-        try:
-            parts = [float(x.strip()) for x in bbox.split(",")]
-            if len(parts) == 4:
-                bounds = parts
-        except Exception:
-            bounds = None
-
-    if not bounds and wetland:
+    geometry = None
+    
+    if wetland:
+        geometry = _aoi_geometry_cache.get(wetland)
         geom_dict = get_wetland_geometry(wetland)
         if geom_dict:
+            if not geometry:
+                geometry = geom_dict
             try:
                 import shapely.geometry as sg
                 bounds = list(sg.shape(geom_dict).bounds)
             except Exception:
                 bounds = None
 
+    if bbox:
+        if not geometry:
+            geometry = _aoi_geometry_cache.get(bbox)
+        if not bounds:
+            try:
+                parts = [float(x.strip()) for x in bbox.split(",")]
+                if len(parts) == 4:
+                    bounds = parts
+            except Exception:
+                bounds = None
+
     if not bounds:
         raise HTTPException(400, "Must provide valid 'bbox=minx,miny,maxx,maxy' or 'wetland'")
 
-    content = await asyncio.to_thread(get_overlay_bytes, mode, start_date, end_date, bounds)
+    content = await asyncio.to_thread(get_overlay_bytes, mode, start_date, end_date, bounds, geometry)
     if not content:
         raise HTTPException(502, f"Could not retrieve satellite imagery for {mode}")
 

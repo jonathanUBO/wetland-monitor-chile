@@ -338,6 +338,43 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
         metricTile = res.maps.end_year.metric;
     }
 
+    const mapRef = useRef<any>(null);
+
+    // Bring boundary line layers to the absolute top of the MapLibre layer stack
+    const bringBoundaryToFront = useCallback(() => {
+        try {
+            const map = mapRef.current?.getMap ? mapRef.current.getMap() : mapRef.current;
+            if (!map || !map.getStyle) return;
+            const style = map.getStyle();
+            if (!style || !style.layers) return;
+            const layers = style.layers;
+            const haloId = `boundary-line-halo-${mode.id}`;
+            const lineId = `boundary-line-${mode.id}`;
+            const lastLayerId = layers[layers.length - 1]?.id;
+
+            // If already the topmost layer, nothing to do
+            if (lastLayerId === lineId) return;
+
+            if (map.getLayer(haloId)) {
+                map.moveLayer(haloId);
+            }
+            if (map.getLayer(lineId)) {
+                map.moveLayer(lineId);
+            }
+        } catch {
+            // style loading or layer not yet added
+        }
+    }, [mode.id]);
+
+    useEffect(() => {
+        const t1 = setTimeout(bringBoundaryToFront, 100);
+        const t2 = setTimeout(bringBoundaryToFront, 400);
+        return () => {
+            clearTimeout(t1);
+            clearTimeout(t2);
+        };
+    }, [overlayData, rgbTile, metricTile, viewYear, boundaryGeoJson, bringBoundaryToFront]);
+
     return (
         <div key={mode.id} className={`bg-black/40 border ${mode.border} rounded-2xl flex flex-col relative overflow-hidden group hover:border-white/20 transition-all`}>
             {/* COMPACT HEADER */}
@@ -389,6 +426,7 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
             {/* MAP BACKGROUND */}
             <div className="absolute inset-0 z-0">
                 <Map
+                    ref={mapRef}
                     {...viewState}
                     onMove={onMove}
                     mapLib={maplibregl as any}
@@ -396,6 +434,7 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                     mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
                     attributionControl={false}
                     reuseMaps={true}
+                    onIdle={bringBoundaryToFront}
                 >
                     {/* 1. FAST SINGLE-IMAGE OVERLAYS (INSTANT LOAD) */}
                     {res && overlayData?.coordinates && (
@@ -465,28 +504,20 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                         </React.Fragment>
                     )}
 
-                    {/* 3. WETLAND BOUNDARY VECTOR OVERLAY - ALWAYS ON TOP WITH HIGH CONTRAST */}
+                    {/* 3. WETLAND BOUNDARY VECTOR OVERLAY - ALWAYS ON TOP, UNFILLED, CRISP THIN LINE */}
                     {boundaryGeoJson && (
                         <Source
-                            key={`boundary-src-${mode.id}`}
+                            key={`boundary-src-${mode.id}-${res ? 'res' : 'no'}-${viewYear}-${overlayData?.rgb_url ? 'ov' : 'tile'}`}
                             id={`boundary-src-${mode.id}`}
                             type="geojson"
                             data={boundaryGeoJson}
                         >
                             <Layer
-                                id={`boundary-fill-${mode.id}`}
-                                type="fill"
-                                paint={{
-                                    'fill-color': '#00f5ff',
-                                    'fill-opacity': 0.12
-                                }}
-                            />
-                            <Layer
                                 id={`boundary-line-halo-${mode.id}`}
                                 type="line"
                                 paint={{
                                     'line-color': '#000000',
-                                    'line-width': 4.5,
+                                    'line-width': 2.2,
                                     'line-opacity': 0.85
                                 }}
                             />
@@ -495,7 +526,7 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                 type="line"
                                 paint={{
                                     'line-color': '#00f5ff',
-                                    'line-width': 2.6,
+                                    'line-width': 1.3,
                                     'line-opacity': 1.0
                                 }}
                             />

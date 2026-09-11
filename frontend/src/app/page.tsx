@@ -43,6 +43,26 @@ const getApiUrl = (): string => {
     return (envUrl || 'http://localhost:8000').replace(/\/$/, '');
 };
 
+// --- CHILEAN ADMINISTRATIVE REGIONS (North to South) ---
+const CHILEAN_REGIONS = [
+    "Arica y Parinacota",
+    "Tarapacá",
+    "Antofagasta",
+    "Atacama",
+    "Coquimbo",
+    "Valparaíso",
+    "Metropolitana",
+    "O'Higgins",
+    "Maule",
+    "Ñuble",
+    "Biobío",
+    "La Araucanía",
+    "Los Ríos",
+    "Los Lagos",
+    "Aysén",
+    "Magallanes"
+];
+
 // --- TYPES ---
 interface TimeSeriesPoint {
     date: string;
@@ -484,6 +504,7 @@ export default function Dashboard() {
     const [wetlands, setWetlands] = useState<any[]>([]);
     const [filteredWetlands, setFilteredWetlands] = useState<any[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
+    const [selectedRegion, setSelectedRegion] = useState<string>('');
     const [selectedWetland, setSelectedWetland] = useState<any | null>(null);
     const [showSuggestions, setShowSuggestions] = useState(false);
 
@@ -536,20 +557,44 @@ export default function Dashboard() {
             });
     }, []);
 
+    // Memoize counts per region
+    const regionCounts = React.useMemo(() => {
+        const counts: Record<string, number> = {};
+        wetlands.forEach(w => {
+            const r = w.region || 'Chile';
+            counts[r] = (counts[r] || 0) + 1;
+        });
+        return counts;
+    }, [wetlands]);
+
+    // Filter wetlands by search and region
     useEffect(() => {
-        if (searchQuery.length > 2) {
-            const query = searchQuery.toLowerCase();
-            const results = wetlands.filter(w =>
-                w.name.toLowerCase().includes(query) ||
-                (w.code && w.code.toLowerCase().includes(query))
-            ).slice(0, 50);
-            setFilteredWetlands(results);
-            setShowSuggestions(true);
-        } else {
-            setFilteredWetlands([]);
-            setShowSuggestions(false);
+        let results = wetlands;
+        if (selectedRegion) {
+            results = results.filter(w => w.region === selectedRegion);
         }
-    }, [searchQuery, wetlands]);
+        if (searchQuery.trim().length > 0) {
+            const query = searchQuery.toLowerCase().trim();
+            results = results.filter(w =>
+                w.name.toLowerCase().includes(query) ||
+                (w.code && String(w.code).toLowerCase().includes(query)) ||
+                (w.region && w.region.toLowerCase().includes(query))
+            );
+        }
+        // Limit results to 150 items for smooth DOM rendering
+        setFilteredWetlands(results.slice(0, 150));
+    }, [searchQuery, selectedRegion, wetlands]);
+
+    // Group filtered results by Chilean region
+    const groupedWetlands = React.useMemo(() => {
+        const groups: Record<string, any[]> = {};
+        filteredWetlands.forEach(w => {
+            const reg = w.region || 'Chile';
+            if (!groups[reg]) groups[reg] = [];
+            groups[reg].push(w);
+        });
+        return groups;
+    }, [filteredWetlands]);
 
     // --- ACTIONS ---
     const selectWetland = (wetland: any) => {
@@ -959,41 +1004,81 @@ export default function Dashboard() {
                     </div>
 
                     {areaSource === 'wetland' ? (
-                        <div className="relative">
-                            <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-500 pointer-events-none" />
-                            <input
-                                ref={searchInputRef}
-                                type="text"
-                                value={searchQuery}
-                                onChange={(e) => { setSearchQuery(e.target.value); updateDropdownRect(); }}
-                                onFocus={() => { updateDropdownRect(); if (filteredWetlands.length > 0) setShowSuggestions(true); }}
-                                onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
-                                placeholder="Buscar humedal..."
-                                className="w-full bg-gray-900 border border-white/10 rounded-xl py-2 pl-10 pr-4 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                            />
-                            {showSuggestions && filteredWetlands.length > 0 && dropdownRect && createPortal(
-                                <div
-                                    style={{
-                                        position: 'fixed',
-                                        top: dropdownRect.bottom + 4,
-                                        left: dropdownRect.left,
-                                        width: dropdownRect.width,
-                                        zIndex: 99999,
+                        <div className="flex flex-col gap-2">
+                            {/* Regional Filter Dropdown */}
+                            <div className="relative">
+                                <select
+                                    value={selectedRegion}
+                                    onChange={(e) => {
+                                        setSelectedRegion(e.target.value);
+                                        setShowSuggestions(true);
+                                        updateDropdownRect();
                                     }}
-                                    className="bg-gray-950 border border-white/15 rounded-xl max-h-56 overflow-y-auto shadow-2xl"
+                                    className="w-full bg-black/60 border border-white/10 hover:border-white/20 rounded-xl px-3 py-2 text-[11px] text-gray-200 outline-none focus:border-blue-500/50 cursor-pointer font-medium transition-colors"
                                 >
-                                    {filteredWetlands.map(w => (
-                                        <button
-                                            key={w.id}
-                                            onMouseDown={() => selectWetland(w)}
-                                            className="w-full text-left px-4 py-2 text-[10px] hover:bg-white/10 border-b border-white/5 text-gray-300 last:border-0"
-                                        >
-                                            {w.name}
-                                        </button>
+                                    <option value="">🗺️ Todas las Regiones ({wetlands.length})</option>
+                                    {CHILEAN_REGIONS.map(reg => (
+                                        <option key={reg} value={reg} className="bg-gray-950 text-gray-200">
+                                            {reg} ({regionCounts[reg] || 0})
+                                        </option>
                                     ))}
-                                </div>,
-                                document.body
-                            )}
+                                </select>
+                            </div>
+
+                            {/* Search Input */}
+                            <div className="relative">
+                                <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-500 pointer-events-none" />
+                                <input
+                                    ref={searchInputRef}
+                                    type="text"
+                                    value={searchQuery}
+                                    onChange={(e) => {
+                                        setSearchQuery(e.target.value);
+                                        setShowSuggestions(true);
+                                        updateDropdownRect();
+                                    }}
+                                    onFocus={() => {
+                                        updateDropdownRect();
+                                        setShowSuggestions(true);
+                                    }}
+                                    onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                                    placeholder={selectedRegion ? `Buscar en ${selectedRegion}...` : "Buscar humedal por nombre o código..."}
+                                    className="w-full bg-gray-900 border border-white/10 rounded-xl py-2 pl-10 pr-4 text-xs focus:ring-1 focus:ring-blue-500 outline-none placeholder:text-gray-500"
+                                />
+
+                                {showSuggestions && filteredWetlands.length > 0 && dropdownRect && createPortal(
+                                    <div
+                                        style={{
+                                            position: 'fixed',
+                                            top: dropdownRect.bottom + 4,
+                                            left: dropdownRect.left,
+                                            width: dropdownRect.width,
+                                            zIndex: 99999,
+                                        }}
+                                        className="bg-gray-950/98 backdrop-blur-2xl border border-white/15 rounded-xl max-h-64 overflow-y-auto shadow-2xl custom-scrollbar"
+                                    >
+                                        {Object.entries(groupedWetlands).map(([regionName, items]) => (
+                                            <div key={regionName} className="border-b border-white/10 last:border-0">
+                                                <div className="sticky top-0 z-10 bg-gray-900 px-3 py-1.5 text-[9px] font-bold uppercase tracking-wider text-blue-400 border-b border-white/10 flex justify-between items-center shadow-sm">
+                                                    <span>📍 {regionName}</span>
+                                                    <span className="text-[8px] text-gray-400 bg-white/5 px-1.5 py-0.5 rounded font-mono">{items.length}</span>
+                                                </div>
+                                                {items.map(w => (
+                                                    <button
+                                                        key={w.id || w.name}
+                                                        onMouseDown={() => selectWetland(w)}
+                                                        className="w-full text-left px-4 py-2 text-[10px] hover:bg-blue-600/20 text-gray-300 hover:text-white transition-colors flex justify-between items-center border-b border-white/5 last:border-0"
+                                                    >
+                                                        <span className="truncate font-medium">{w.name}</span>
+                                                        {w.code && <span className="text-[8px] text-gray-500 font-mono ml-2">#{w.code}</span>}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        ))}
+                                    </div>,
+                                    document.body
+                                )}
+                            </div>
                         </div>
                     ) : (
                         <div>

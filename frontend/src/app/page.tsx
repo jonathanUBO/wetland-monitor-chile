@@ -412,7 +412,6 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                         id={`${mode.id}-ov-rgb-layer`}
                                         type="raster"
                                         paint={{ 'raster-opacity': 0.65 }}
-                                        beforeId={boundaryGeoJson ? `boundary-fill-${mode.id}` : undefined}
                                     />
                                 </Source>
                             )}
@@ -428,7 +427,6 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                         id={`${mode.id}-ov-metric-layer`}
                                         type="raster"
                                         paint={{ 'raster-opacity': 0.85 }}
-                                        beforeId={boundaryGeoJson ? `boundary-fill-${mode.id}` : undefined}
                                     />
                                 </Source>
                             )}
@@ -449,7 +447,6 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                     id={`${mode.id}-rgb-layer`}
                                     type="raster"
                                     paint={{ 'raster-opacity': 0.6 }}
-                                    beforeId={boundaryGeoJson ? `boundary-fill-${mode.id}` : undefined}
                                 />
                             </Source>
                             <Source
@@ -463,7 +460,6 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                     id={`${mode.id}-metric-layer`}
                                     type="raster"
                                     paint={{}}
-                                    beforeId={boundaryGeoJson ? `boundary-fill-${mode.id}` : undefined}
                                 />
                             </Source>
                         </React.Fragment>

@@ -129,9 +129,10 @@ def load_wetlands_catalogue():
     try:
         # Try both relative to current and absolute based on workspace structure
         paths_to_try = [
-            WETLANDS_CATALOGUE_PATH,
+            Path(__file__).resolve().parent / "wetlands.json",
             Path("wetlands.json"),
-            Path("d:/Proyectos_software/wetland-monitor-chile/frontend/public/wetlands.json")
+            WETLANDS_CATALOGUE_PATH,
+            Path("../frontend/public/wetlands.json")
         ]
         
         for p in paths_to_try:
@@ -1067,7 +1068,12 @@ def generate_map_url(aoi, start, end, mode, wetland_name=None):
     except Exception:
         overlay_coords = None
 
-    ov_suffix = suffix if wetland_name else (f"?bbox={bbox_str}" if bbox_str else "")
+    params = []
+    if bbox_str:
+        params.append(f"bbox={bbox_str}")
+    if wetland_name:
+        params.append(f"wetland={wetland_name}")
+    ov_suffix = f"?{'&'.join(params)}" if params else ""
 
     return {
         "rgb": f"{BASE_URL}/api/tiles/rgb/{start}/{end}/{{z}}/{{x}}/{{y}}{suffix}",
@@ -1337,15 +1343,7 @@ async def get_overlay(
     Returns Cache-Control headers for instant client-side rendering.
     """
     bounds = None
-    if wetland:
-        geom_dict = get_wetland_geometry(wetland)
-        if geom_dict:
-            try:
-                import shapely.geometry as sg
-                bounds = list(sg.shape(geom_dict).bounds)
-            except Exception:
-                bounds = None
-    elif bbox:
+    if bbox:
         try:
             parts = [float(x.strip()) for x in bbox.split(",")]
             if len(parts) == 4:
@@ -1353,8 +1351,17 @@ async def get_overlay(
         except Exception:
             bounds = None
 
+    if not bounds and wetland:
+        geom_dict = get_wetland_geometry(wetland)
+        if geom_dict:
+            try:
+                import shapely.geometry as sg
+                bounds = list(sg.shape(geom_dict).bounds)
+            except Exception:
+                bounds = None
+
     if not bounds:
-        raise HTTPException(400, "Must provide 'wetland' or valid 'bbox=minx,miny,maxx,maxy'")
+        raise HTTPException(400, "Must provide valid 'bbox=minx,miny,maxx,maxy' or 'wetland'")
 
     content = await asyncio.to_thread(get_overlay_bytes, mode, start_date, end_date, bounds)
     if not content:

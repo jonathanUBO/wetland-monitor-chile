@@ -276,9 +276,20 @@ interface IndexCardProps {
     viewState: any;
     onMove: (evt: any) => void;
     viewYear: 'start' | 'end';
+    boundaryGeometry?: any;
 }
 
-const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear }: IndexCardProps) => {
+const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeometry }: IndexCardProps) => {
+
+    // Memoize the GeoJSON Feature for the wetland perimeter
+    const boundaryGeoJson = React.useMemo(() => {
+        if (!boundaryGeometry) return null;
+        return {
+            type: 'Feature' as const,
+            geometry: boundaryGeometry,
+            properties: {}
+        };
+    }, [boundaryGeometry]);
 
     // Determine which map tiles to use
     let rgbTile = res?.maps?.rgb;
@@ -381,6 +392,42 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear }: IndexCard
                                 />
                             </Source>
                         </React.Fragment>
+                    )}
+                    {/* WETLAND BOUNDARY VECTOR OVERLAY */}
+                    {boundaryGeoJson && (
+                        <Source
+                            key={`boundary-src-${mode.id}`}
+                            id={`boundary-src-${mode.id}`}
+                            type="geojson"
+                            data={boundaryGeoJson}
+                        >
+                            <Layer
+                                id={`boundary-fill-${mode.id}`}
+                                type="fill"
+                                paint={{
+                                    'fill-color': '#0ea5e9',
+                                    'fill-opacity': 0.08
+                                }}
+                            />
+                            <Layer
+                                id={`boundary-line-halo-${mode.id}`}
+                                type="line"
+                                paint={{
+                                    'line-color': '#000000',
+                                    'line-width': 4,
+                                    'line-opacity': 0.75
+                                }}
+                            />
+                            <Layer
+                                id={`boundary-line-${mode.id}`}
+                                type="line"
+                                paint={{
+                                    'line-color': '#38bdf8',
+                                    'line-width': 2.2,
+                                    'line-opacity': 1.0
+                                }}
+                            />
+                        </Source>
                     )}
                 </Map>
             </div>
@@ -777,6 +824,26 @@ export default function Dashboard() {
             setGeneratingReport(false);
         }
     };
+
+    // Computed active geometry (exact GeoJSON polygon or bbox of wetland/custom area)
+    const activeGeometry = React.useMemo(() => {
+        if (areaSource === 'custom' && customArea) {
+            return customArea;
+        }
+        if (selectedWetland) {
+            if (selectedWetland.geometry) {
+                return selectedWetland.geometry;
+            }
+            if (selectedWetland.bbox) {
+                const [minX, minY, maxX, maxY] = selectedWetland.bbox;
+                return {
+                    type: "Polygon",
+                    coordinates: [[[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY], [minX, minY]]]
+                };
+            }
+        }
+        return null;
+    }, [areaSource, customArea, selectedWetland]);
 
     // --- RENDER ---
     return (
@@ -1291,6 +1358,7 @@ export default function Dashboard() {
                             viewState={viewState}
                             onMove={evt => setViewState(evt.viewState)}
                             viewYear={viewYear}
+                            boundaryGeometry={activeGeometry}
                         />
                     ))}
                 </div>

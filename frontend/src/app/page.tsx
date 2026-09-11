@@ -627,8 +627,24 @@ export default function Dashboard() {
     const [showSuggestions, setShowSuggestions] = useState(false);
 
     // CDSE Credentials
-    const [cdseUsername, setCdseUsername] = useState('');
-    const [cdsePassword, setCdsePassword] = useState('');
+    const [cdseUsername, setCdseUsername] = useState(() => {
+        if (typeof window !== 'undefined') {
+            try {
+                const saved = localStorage.getItem('cdse_credentials');
+                if (saved) return JSON.parse(saved).username || '';
+            } catch {}
+        }
+        return '';
+    });
+    const [cdsePassword, setCdsePassword] = useState(() => {
+        if (typeof window !== 'undefined') {
+            try {
+                const saved = localStorage.getItem('cdse_credentials');
+                if (saved) return JSON.parse(saved).password || '';
+            } catch {}
+        }
+        return '';
+    });
     const [cdseConfigured, setCdseConfigured] = useState(false);
     const [cdseError, setCdseError] = useState<string | null>(null);
     const [cdseSuccess, setCdseSuccess] = useState<string | null>(null);
@@ -660,13 +676,38 @@ export default function Dashboard() {
             .then(setWetlands)
             .catch(console.error);
 
-        // Check CDSE credentials status
+        // Check CDSE credentials status with auto-restore
         const API = getApiUrl();
         axios.get(`${API}/credentials-status`)
-            .then(r => {
-                setCdseConfigured(r.data.configured);
-                if (!r.data.configured) {
-                    setShowCredentials(true);
+            .then(async r => {
+                if (r.data.configured) {
+                    setCdseConfigured(true);
+                } else {
+                    // Try auto-restoring credentials from localStorage
+                    let restored = false;
+                    try {
+                        const saved = localStorage.getItem('cdse_credentials');
+                        if (saved) {
+                            const parsed = JSON.parse(saved);
+                            if (parsed.username && parsed.password) {
+                                const authRes = await axios.post(`${API}/set-credentials`, {
+                                    username: parsed.username,
+                                    password: parsed.password
+                                });
+                                if (authRes.data?.status === 'ok') {
+                                    setCdseConfigured(true);
+                                    restored = true;
+                                    setProcessLog(prev => [...prev, '✓  Credenciales CDSE sincronizadas con el servidor']);
+                                }
+                            }
+                        }
+                    } catch {
+                        // ignore auto-restore error
+                    }
+                    if (!restored) {
+                        setCdseConfigured(false);
+                        setShowCredentials(true);
+                    }
                 }
             })
             .catch(() => {
@@ -773,6 +814,12 @@ export default function Dashboard() {
                 username: cdseUsername,
                 password: cdsePassword
             });
+            try {
+                localStorage.setItem('cdse_credentials', JSON.stringify({
+                    username: cdseUsername,
+                    password: cdsePassword
+                }));
+            } catch {}
             setCdseConfigured(true);
             setCdseSuccess('Conectado y listo para procesar imágenes Sentinel-2.');
             setProcessLog(prev => [...prev, '[OK] Credenciales CDSE activadas correctamente']);
@@ -844,9 +891,32 @@ export default function Dashboard() {
 
     const handleAnalyze = async () => {
         if (!cdseConfigured) {
-            setShowCredentials(true);
-            setError("Debes ingresar y verificar tus credenciales de Copernicus CDSE antes de iniciar el análisis.");
-            return;
+            // Attempt auto-restoring credentials from localStorage before aborting
+            let restored = false;
+            try {
+                const saved = localStorage.getItem('cdse_credentials');
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    if (parsed.username && parsed.password) {
+                        setProcessLog(prev => [...prev, "🔑 Conectando credenciales CDSE..."]);
+                        const authRes = await axios.post(`${getApiUrl()}/set-credentials`, {
+                            username: parsed.username,
+                            password: parsed.password
+                        });
+                        if (authRes.data?.status === 'ok') {
+                            setCdseConfigured(true);
+                            restored = true;
+                            setProcessLog(prev => [...prev, "✓  Credenciales CDSE autenticadas"]);
+                        }
+                    }
+                }
+            } catch {}
+
+            if (!restored) {
+                setShowCredentials(true);
+                setError("Debes ingresar y verificar tus credenciales de Copernicus CDSE antes de iniciar el análisis.");
+                return;
+            }
         }
 
         const hasArea = areaSource === 'wetland' ? !!selectedWetland : !!customArea;
@@ -915,6 +985,20 @@ export default function Dashboard() {
 
             if (res.data.status === 'success') {
                 const data = res.data.data;
+                const allErrors = Object.values(data).every((item: any) => item?.status === 'error');
+                if (allErrors) {
+                    const firstMsg = (Object.values(data)[0] as any)?.error || "Error al procesar índices satelitales";
+                    if (firstMsg.toLowerCase().includes("credentials") || firstMsg.toLowerCase().includes("credenciales")) {
+                        setCdseConfigured(false);
+                        setShowCredentials(true);
+                        setError("Las credenciales de Copernicus CDSE no están activas en el servidor. Por favor ingresa tus credenciales en el panel lateral.");
+                    } else {
+                        setError(`Error en análisis: ${firstMsg}`);
+                    }
+                    setProcessLog(prev => [...prev, `✗  ERR: ${firstMsg.substring(0, 40)}...`]);
+                    return;
+                }
+
                 setResults(data);
                 setMergedData(resampleToMonthly(mergeTimeSeries(data)));
                 setProcessLog(prev => [...prev, "✓  Análisis finalizado exitosamente"]);
@@ -931,9 +1015,16 @@ export default function Dashboard() {
             }
         } catch (err: any) {
             console.error("Analysis error:", err);
+            const status = err.response?.status;
             const detail = err.response?.data?.detail || err.message || "Error desconocido";
-            setError(`Error en análisis: ${detail}`);
-            setProcessLog(prev => [...prev, `✗  ERR: ${detail.substring(0, 30)}...`]);
+            if (status === 401 || detail.toLowerCase().includes("credentials") || detail.toLowerCase().includes("credenciales")) {
+                setCdseConfigured(false);
+                setShowCredentials(true);
+                setError("Credenciales de Copernicus CDSE no configuradas o expiradas. Por favor ingresa tus credenciales en el panel lateral.");
+            } else {
+                setError(`Error en análisis: ${detail}`);
+            }
+            setProcessLog(prev => [...prev, `✗  ERR: ${detail.substring(0, 35)}...`]);
         } finally {
             setLoading(false);
         }

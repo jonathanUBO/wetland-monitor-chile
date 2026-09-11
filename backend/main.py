@@ -734,8 +734,41 @@ CDSE_PASSWORD = os.getenv("CDSE_PASSWORD", "")
 CDSE_CLIENT_ID = os.getenv("CDSE_CLIENT_ID", "")
 CDSE_CLIENT_SECRET = os.getenv("CDSE_CLIENT_SECRET", "")
 
+_CDSE_STORAGE_PATH = Path(__file__).resolve().parent / "_cdse_storage.json"
+
+def _load_persisted_credentials():
+    global CDSE_USERNAME, CDSE_PASSWORD, CDSE_CLIENT_ID, CDSE_CLIENT_SECRET
+    if not (CDSE_USERNAME and CDSE_PASSWORD) and not (CDSE_CLIENT_ID and CDSE_CLIENT_SECRET):
+        if _CDSE_STORAGE_PATH.exists():
+            try:
+                with open(_CDSE_STORAGE_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    CDSE_USERNAME = data.get("username", "")
+                    CDSE_PASSWORD = data.get("password", "")
+                    CDSE_CLIENT_ID = data.get("client_id", "")
+                    CDSE_CLIENT_SECRET = data.get("client_secret", "")
+                    if CDSE_USERNAME or CDSE_CLIENT_ID:
+                        logger.info("Persisted CDSE credentials reloaded from local storage")
+            except Exception as e:
+                logger.warning(f"Could not load persisted credentials: {e}")
+
+def _save_persisted_credentials():
+    try:
+        data = {
+            "username": CDSE_USERNAME,
+            "password": CDSE_PASSWORD,
+            "client_id": CDSE_CLIENT_ID,
+            "client_secret": CDSE_CLIENT_SECRET
+        }
+        with open(_CDSE_STORAGE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.warning(f"Could not persist credentials: {e}")
+
+_load_persisted_credentials()
+
 if not (CDSE_USERNAME and CDSE_PASSWORD) and not (CDSE_CLIENT_ID and CDSE_CLIENT_SECRET):
-    logger.warning("CDSE credentials not found in env. Configure via UI or .env file.")
+    logger.warning("CDSE credentials not found in env or storage. Configure via UI or .env file.")
 
 # Robust HTTP session with connection pooling and retries
 http_session = requests.Session()
@@ -1389,6 +1422,10 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
 
 @app.post("/analyze-all")
 async def analyze_all(request: AnalysisRequest, authorization: str = Header(None)):
+    # Check credentials upfront before starting processing
+    if not (CDSE_USERNAME and CDSE_PASSWORD) and not (CDSE_CLIENT_ID and CDSE_CLIENT_SECRET):
+        raise HTTPException(401, detail="Credenciales de Copernicus CDSE no configuradas. Por favor ingresa tus credenciales en el panel lateral.")
+
     try:
         results = {}
         modes = ["Hydrology", "Vegetation", "WaterQuality", "SoilVegetation", "AlgaeBloom", "WaterRatio"]
@@ -1422,8 +1459,19 @@ async def analyze_all(request: AnalysisRequest, authorization: str = Header(None
             logger.info(log_process_stage('', m, 'processing'))
             results[m] = perform_single_analysis(request, m)
             
+        # If all modes failed with error status, raise HTTPException so frontend displays error
+        error_modes = [m for m, r in results.items() if isinstance(r, dict) and r.get("status") == "error"]
+        if len(error_modes) == len(modes):
+            first_err = results[modes[0]].get("error", "Error desconocido al procesar datos satelitales")
+            logger.error(f"All modes failed in analyze-all: {first_err}")
+            if "credentials" in str(first_err).lower() or "credenciales" in str(first_err).lower():
+                raise HTTPException(401, detail=f"Error de credenciales CDSE: {first_err}")
+            raise HTTPException(500, detail=f"Error en procesamiento satelital: {first_err}")
+
         logger.info(log_process_stage('', None, 'final'))
         return {"status": "success", "data": results}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Analyze-all Error: {e}")
         raise HTTPException(500, detail=f"Backend Error: {str(e)}")
@@ -1693,11 +1741,13 @@ async def set_credentials(payload: dict):
     # Verify credentials work
     try:
         get_cdse_token()
+        _save_persisted_credentials()
     except Exception as e:
         CDSE_USERNAME = ""
         CDSE_PASSWORD = ""
         CDSE_CLIENT_ID = ""
         CDSE_CLIENT_SECRET = ""
+        _save_persisted_credentials()
         raise HTTPException(401, f"Fallo de autenticación con Copernicus: {e}")
     return {"status": "ok", "message": "Acceso a Copernicus verificado y activado con éxito"}
 

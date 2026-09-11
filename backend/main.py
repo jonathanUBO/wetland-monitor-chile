@@ -403,7 +403,8 @@ def fetch_thumbnail_bytes(mode: str, start_date: str, end_date: str, geometry: O
                     "type": "sentinel-2-l2a",
                     "dataFilter": {
                         "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                        "maxCloudCoverage": 25
+                        "maxCloudCoverage": 0,
+                        "mosaickingOrder": "leastCC"
                     }
                 }]
             },
@@ -969,7 +970,7 @@ def analyze_period(aoi, start_date, end_date, mode):
                     "type": "sentinel-2-l2a",
                     "dataFilter": {
                         "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                        "maxCloudCoverage": 20
+                        "maxCloudCoverage": 10
                     }
                 }]
             },
@@ -1257,8 +1258,8 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
                     "type": "sentinel-2-l2a",
                     "dataFilter": {
                         "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                        "maxCloudCoverage": 25,
-                        "mosaickingOrder": "mostRecent"
+                        "maxCloudCoverage": 0,
+                        "mosaickingOrder": "leastCC"
                     }
                 }]
             },
@@ -1276,7 +1277,18 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
             json=payload,
             timeout=25
         )
-        if resp.status_code == 200 and resp.content:
+        
+        # Fallback if the date window has 0 acquisitions with strictly 0.00% cloud cover
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+            payload["input"]["data"][0]["dataFilter"]["maxCloudCoverage"] = 15
+            resp = http_session.post(
+                "https://sh.dataspace.copernicus.eu/api/v1/process",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=25
+            )
+
+        if resp.status_code == 200 and resp.content and len(resp.content) >= 800:
             with _cache_lock:
                 if len(_overlay_cache) > _MAX_CACHE_SIZE:
                     keys = list(_overlay_cache.keys())[:int(_MAX_CACHE_SIZE * 0.2)]
@@ -1412,8 +1424,8 @@ async def get_rgb_tile(start_date: str, end_date: str, z: int, x: int, y: int, w
                 "type": "sentinel-2-l2a",
                 "dataFilter": {
                     "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                    "maxCloudCoverage": 25,
-                    "mosaickingOrder": "mostRecent"
+                    "maxCloudCoverage": 0,
+                    "mosaickingOrder": "leastCC"
                 }
             }]
         },
@@ -1473,8 +1485,8 @@ async def get_metric_tile(mode: str, start_date: str, end_date: str, z: int, x: 
                 "type": "sentinel-2-l2a",
                 "dataFilter": {
                     "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                    "maxCloudCoverage": 25,
-                    "mosaickingOrder": "mostRecent"
+                    "maxCloudCoverage": 0,
+                    "mosaickingOrder": "leastCC"
                 }
             }]
         },

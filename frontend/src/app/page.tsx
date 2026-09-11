@@ -798,7 +798,10 @@ export default function Dashboard() {
         setLoading(true);
         setError(null);
         setResults(null);
-        setProcessLog(["⚙️  Iniciando análisis multi-espectral..."]);
+        setProcessLog([
+            "⚙️  Iniciando análisis multi-espectral...",
+            "☀️  Filtro de nubosidad activo: 0% (Imágenes despejadas / leastCC)"
+        ]);
         setViewYear('end');
 
         let aoiGeometry: any;
@@ -1351,6 +1354,17 @@ export default function Dashboard() {
                     </div>
                     <div className="text-[8px] text-gray-500 -mt-1.5 text-center font-mono">
                         Sentinel-2 MSI disponible desde julio 2015
+                    </div>
+
+                    {/* FILTRO NUBOSIDAD INDICATOR */}
+                    <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-sky-500/10 border border-sky-500/20 text-[9px] font-mono text-sky-300">
+                        <span className="flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse" />
+                            Filtro Nubosidad:
+                        </span>
+                        <span className="font-bold text-white bg-sky-500/25 px-1.5 py-0.5 rounded border border-sky-400/30 text-[8px]">
+                            0% (DESPEJADO)
+                        </span>
                     </div>
 
                     <button

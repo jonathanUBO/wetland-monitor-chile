@@ -368,8 +368,8 @@ def calculate_trend_statistics(current_data: List[Dict], previous_data: List[Dic
 _thumb_cache: Dict[str, bytes] = {}
 
 def fetch_thumbnail_bytes(mode: str, start_date: str, end_date: str, geometry: Optional[dict] = None, wetland_name: Optional[str] = None) -> Optional[io.BytesIO]:
-    """Fetch Sentinel-2 PNG thumbnail directly from CDSE Process API.
-    Bypasses localhost HTTP loopback, uses in-memory caching and strict timeout.
+    """Fetch Sentinel-2 PNG thumbnail directly using get_overlay_bytes.
+    Leverages in-memory cache, aspect ratio preservation, deduplication, and multi-tier cloud fallbacks.
     """
     if not geometry and wetland_name:
         geometry = get_wetland_geometry(wetland_name)
@@ -377,57 +377,14 @@ def fetch_thumbnail_bytes(mode: str, start_date: str, end_date: str, geometry: O
     if not geometry:
         return None
 
-    cache_key = f"{wetland_name or 'custom'}_{mode}_{start_date[:10]}_{end_date[:10]}"
-    if cache_key in _thumb_cache:
-        return io.BytesIO(_thumb_cache[cache_key])
-
-    try:
-        token = get_cdse_token()
-    except Exception as e:
-        logger.error(f"Cannot get CDSE token for thumbnail: {e}")
-        return None
-
     try:
         import shapely.geometry as sg
         geom = sg.shape(geometry)
         bounds = list(geom.bounds)
-
-        evalscript = get_evalscript(mode, is_process=True)
-        payload = {
-            "input": {
-                "bounds": {
-                    "bbox": bounds,
-                    "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
-                },
-                "data": [{
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                        "maxCloudCoverage": 0,
-                        "mosaickingOrder": "leastCC"
-                    }
-                }]
-            },
-            "output": {
-                "width": 512,
-                "height": 512,
-                "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
-            },
-            "evalscript": evalscript
-        }
-
-        resp = http_session.post(
-            "https://sh.dataspace.copernicus.eu/api/v1/process",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=12
-        )
-        if resp.status_code == 200 and resp.content:
-            _thumb_cache[cache_key] = resp.content
-            return io.BytesIO(resp.content)
-        else:
-            logger.warning(f"CDSE Process API returned status {resp.status_code} for {mode} thumbnail")
-            return None
+        content = get_overlay_bytes(mode, start_date, end_date, bounds)
+        if content and len(content) >= 500:
+            return io.BytesIO(content)
+        return None
     except Exception as e:
         logger.warning(f"Failed fetching thumbnail for {mode} ({start_date} - {end_date}): {e}")
         return None
@@ -438,7 +395,9 @@ def download_image(url: str) -> Optional[io.BytesIO]:
     try:
         response = requests.get(url, timeout=8)
         response.raise_for_status()
-        return io.BytesIO(response.content)
+        if response.content and len(response.content) >= 500:
+            return io.BytesIO(response.content)
+        return None
     except Exception as e:
         logger.warning(f"Error downloading image from URL {url[:60]}: {e}")
         return None
@@ -513,10 +472,10 @@ def create_temporal_chart(time_series: List[Dict], mode: str) -> io.BytesIO:
     return img_buffer
 
 def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_results: Dict, start_date: str, end_date: str) -> io.BytesIO:
-    """Generate a comprehensive Word report for wetland analysis."""
+    """Generate a comprehensive Word report for wetland analysis comparing initial and final periods."""
     doc = Document()
     header = doc.sections[0].header
-    header.paragraphs[0].text = "WETLAND MONITOR - REPORTE DE ANÁLISIS"
+    header.paragraphs[0].text = "WETLAND MONITOR - REPORTE DE ANÁLISIS COMPARATIVO"
     header.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
     header.paragraphs[0].runs[0].font.size = Pt(10)
     header.paragraphs[0].runs[0].font.bold = True
@@ -536,42 +495,52 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
     meta_table.rows[2].cells[1].text = wetland_metadata.get('code', 'N/A')
     meta_table.rows[3].cells[0].text = 'Coordenadas'
     meta_table.rows[3].cells[1].text = wetland_metadata.get('coordinates', 'N/A')
-    meta_table.rows[4].cells[0].text = 'Fecha'
+    meta_table.rows[4].cells[0].text = 'Fecha de Emisión'
     meta_table.rows[4].cells[1].text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     doc.add_paragraph()
     
-    doc.add_heading('Período de Análisis', level=2)
-    p = doc.add_paragraph()
-    p.add_run('Desde: ').bold = True
-    p.add_run(start_date)
-    p.add_run(' | ')
-    p.add_run('Hasta: ').bold = True
-    p.add_run(end_date)
-    doc.add_paragraph()
-    
-    doc.add_heading('Resultados del Análisis', level=2)
-    modes = ['Hydrology', 'Vegetation', 'WaterQuality', 'SoilVegetation', 'AlgaeBloom', 'WaterRatio']
+    # Calculate comparative periods
+    try:
+        start_dt = datetime.strptime(start_date[:10], '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date[:10], '%Y-%m-%d')
+        start_year = str(start_dt.year)
+        end_year = str(end_dt.year)
+        diff_years = end_dt.year - start_dt.year
+        if diff_years >= 2:
+            s_end = (start_dt + relativedelta(years=1)).strftime('%Y-%m-%d')
+            e_start = (end_dt - relativedelta(years=1)).strftime('%Y-%m-%d')
+        else:
+            half_days = max(30, (end_dt - start_dt).days // 2)
+            s_end = (start_dt + timedelta(days=half_days)).strftime('%Y-%m-%d')
+            e_start = (end_dt - timedelta(days=half_days)).strftime('%Y-%m-%d')
+    except Exception:
+        start_year = start_date[:4] if len(start_date) >= 4 else "Inicial"
+        end_year = end_date[:4] if len(end_date) >= 4 else "Final"
+        s_end = start_date
+        e_start = end_date
 
-    # Pre-fetch all required thumbnails in parallel (max 6 workers, direct CDSE, zero localhost loopback)
+    doc.add_heading('Período de Análisis Comparativo', level=2)
+    p = doc.add_paragraph()
+    p.add_run('Rango Completo: ').bold = True
+    p.add_run(f'{start_date} a {end_date}\n')
+    p.add_run(f'• Período Inicial ({start_year}): ').bold = True
+    p.add_run(f'{start_date} a {s_end}\n')
+    p.add_run(f'• Período Final ({end_year}): ').bold = True
+    p.add_run(f'{e_start} a {end_date}')
+    doc.add_paragraph()
+
+    modes = ['Hydrology', 'Vegetation', 'WaterQuality', 'SoilVegetation', 'AlgaeBloom', 'WaterRatio']
     geometry = wetland_metadata.get('geometry') or get_wetland_geometry(wetland_name)
     thumbnails_map: Dict[Tuple[str, str], Optional[io.BytesIO]] = {}
     
     if geometry:
         import concurrent.futures
         tasks = []
-        try:
-            start_dt = datetime.strptime(start_date[:10], '%Y-%m-%d')
-            end_dt = datetime.strptime(end_date[:10], '%Y-%m-%d')
-            s_end = (start_dt + relativedelta(years=1)).strftime('%Y-%m-%d')
-            e_start = (end_dt - relativedelta(years=1)).strftime('%Y-%m-%d')
-        except Exception:
-            s_end = start_date
-            e_start = end_date
-
-        for m in modes:
-            if m in analysis_results:
-                tasks.append((m, 'start', start_date, s_end))
-                tasks.append((m, 'end', e_start, end_date))
+        # Pre-fetch RGB (natural color satellite images) and all active modes
+        prefetch_modes = ['RGB'] + [m for m in modes if m in analysis_results]
+        for m in prefetch_modes:
+            tasks.append((m, 'start', start_date, s_end))
+            tasks.append((m, 'end', e_start, end_date))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             future_to_task = {
@@ -586,6 +555,45 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
                         thumbnails_map[(m, kind)] = img_io
                 except Exception as ex:
                     logger.warning(f"Thumbnail prefetch error for {m} {kind}: {ex}")
+
+    # Section: Natural Color Optical Satellite Imagery (RGB)
+    rgb_start = thumbnails_map.get(('RGB', 'start'))
+    rgb_end = thumbnails_map.get(('RGB', 'end'))
+    if rgb_start or rgb_end:
+        doc.add_heading('Registro Fotográfico Satelital (Color Natural RGB)', level=2)
+        doc.add_paragraph('Comparativa visual óptica Sentinel-2 (L2A) en color verdadero entre el estado inicial y final del humedal.', style='Intense Quote')
+        
+        rgb_table = doc.add_table(rows=2, cols=2)
+        rgb_table.autofit = True
+        rgb_table.style = 'Table Grid'
+        
+        c_rgb_start = rgb_table.rows[0].cells[0]
+        c_rgb_end = rgb_table.rows[0].cells[1]
+        c_rgb_cap_start = rgb_table.rows[1].cells[0]
+        c_rgb_cap_end = rgb_table.rows[1].cells[1]
+        
+        c_rgb_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if rgb_start:
+            rgb_start.seek(0)
+            c_rgb_start.paragraphs[0].add_run().add_picture(rgb_start, width=Inches(2.8))
+            c_rgb_cap_start.text = f"Fotografía Inicial ({start_date[:10]} - {s_end[:10]})"
+            c_rgb_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        else:
+            c_rgb_cap_start.text = f"Fotografía Inicial ({start_date[:10]}): Sin imagen disponible"
+            c_rgb_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            
+        c_rgb_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if rgb_end:
+            rgb_end.seek(0)
+            c_rgb_end.paragraphs[0].add_run().add_picture(rgb_end, width=Inches(2.8))
+            c_rgb_cap_end.text = f"Fotografía Final ({e_start[:10]} - {end_date[:10]})"
+            c_rgb_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        else:
+            c_rgb_cap_end.text = f"Fotografía Final ({end_date[:10]}): Sin imagen disponible"
+            c_rgb_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        doc.add_paragraph()
+
+    doc.add_heading('Resultados del Análisis Espectral', level=2)
     
     for mode in modes:
         if mode not in analysis_results: continue
@@ -593,39 +601,50 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
         stats = res.get('stats', {})
         maps = res.get('maps', {})
         
+        initial_val = stats.get('initial') if stats.get('initial') is not None else stats.get('last', 0)
+        final_val = stats.get('current', 0)
+        trend = stats.get('trend', 0)
+        trend_delta = stats.get('trend_delta', final_val - initial_val if initial_val != 0 else trend)
+        initial_std = stats.get('initial_std', 0)
+        final_std = stats.get('current_std', 0)
+        sen_slope = stats.get('sen_slope', 0.0)
+        cv = stats.get('cv', 0)
+        data_count = stats.get('data_count', 0)
+        outlier_count = stats.get('outlier_count', 0)
+        
         doc.add_heading(f'{mode} - {get_index_name(mode)}', level=3)
         doc.add_paragraph(get_mode_description(mode), style='Intense Quote')
         
         st_table = doc.add_table(rows=8, cols=2)
         st_table.style = 'Light List Accent 1'
-        st_table.rows[0].cells[0].text = 'Valor Actual (Mediana)'
-        st_table.rows[0].cells[1].text = f"{stats.get('current', 0):.4f}"
-        st_table.rows[1].cells[0].text = 'Valor Año Anterior'
-        st_table.rows[1].cells[1].text = f"{stats.get('last', 0):.4f}"
+        st_table.rows[0].cells[0].text = f'Valor Período Inicial ({start_year})'
+        st_table.rows[0].cells[1].text = f"{initial_val:.4f}"
+        st_table.rows[1].cells[0].text = f'Valor Período Final ({end_year})'
+        st_table.rows[1].cells[1].text = f"{final_val:.4f}"
         
-        trend = stats.get('trend', 0)
+        st_table.rows[2].cells[0].text = 'Variación Absoluta (Δ Mediana)'
         trend_cell = st_table.rows[2].cells[1]
-        trend_cell.text = f"{trend:+.4f} (Δ Mediana)"
-        st_table.rows[2].cells[0].text = 'Tendencia (Cambio Absoluto)'
-        color = RGBColor(34, 197, 94) if trend > 0 else RGBColor(239, 68, 68)
+        trend_cell.text = f"{trend_delta:+.4f} (Δ Mediana)"
+        color = RGBColor(34, 197, 94) if trend_delta >= 0 else RGBColor(239, 68, 68)
         trend_cell.paragraphs[0].runs[0].font.color.rgb = color
 
-        sen_slope = stats.get('sen_slope', 0.0)
-        sen_cell = st_table.rows[3].cells[1]
-        sen_cell.text = f"{sen_slope:+.4f} / año (Theil-Sen)"
-        st_table.rows[3].cells[0].text = 'Pendiente de Tendencia'
+        st_table.rows[3].cells[0].text = 'Tasa de Cambio Anual (Theil-Sen)'
+        st_table.rows[3].cells[1].text = f"{sen_slope:+.4f} / año"
         
-        st_table.rows[4].cells[0].text = 'Desviación Estándar'
-        st_table.rows[4].cells[1].text = f"{stats.get('current_std', 0):.4f}"
-        st_table.rows[5].cells[0].text = 'Coeficiente de Variación'
-        st_table.rows[5].cells[1].text = f"{stats.get('cv', 0):.2f}%"
-        st_table.rows[6].cells[0].text = 'Puntos de Datos'
-        st_table.rows[6].cells[1].text = str(stats.get('data_count', 0))
-        st_table.rows[7].cells[0].text = 'Valores Atípicos (Estacionales)'
-        st_table.rows[7].cells[1].text = str(stats.get('outlier_count', 0))
+        st_table.rows[4].cells[0].text = f'Desviación Estándar Inicial ({start_year})'
+        st_table.rows[4].cells[1].text = f"{initial_std:.4f}" if initial_std != 0 else f"{final_std:.4f}"
+        
+        st_table.rows[5].cells[0].text = f'Desviación Estándar Final ({end_year})'
+        st_table.rows[5].cells[1].text = f"{final_std:.4f}"
+        
+        st_table.rows[6].cells[0].text = 'Total Puntos de Datos'
+        st_table.rows[6].cells[1].text = str(data_count)
+        
+        st_table.rows[7].cells[0].text = 'Valores Atípicos Detectados'
+        st_table.rows[7].cells[1].text = str(outlier_count)
         doc.add_paragraph()
         
-        doc.add_heading('Mapas del Índice', level=4)
+        doc.add_heading(f'Mapas Comparativos del Índice {get_index_name(mode)}', level=4)
         
         img_start = thumbnails_map.get((mode, 'start'))
         img_end = thumbnails_map.get((mode, 'end'))
@@ -649,14 +668,22 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
             
             c_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             if img_start:
+                img_start.seek(0)
                 c_start.paragraphs[0].add_run().add_picture(img_start, width=Inches(2.8))
-                c_cap_start.text = f"Mapa Inicial ({start_date})"
+                c_cap_start.text = f"Mapa Inicial ({start_date[:10]} - {s_end[:10]})"
+                c_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                c_cap_start.text = f"Mapa Inicial ({start_date[:10]}): Sin imagen disponible"
                 c_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 
             c_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             if img_end:
+                img_end.seek(0)
                 c_end.paragraphs[0].add_run().add_picture(img_end, width=Inches(2.8))
-                c_cap_end.text = f"Mapa Final ({end_date})"
+                c_cap_end.text = f"Mapa Final ({e_start[:10]} - {end_date[:10]})"
+                c_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                c_cap_end.text = f"Mapa Final ({end_date[:10]}): Sin imagen disponible"
                 c_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 
         legend = create_legend_image(mode)
@@ -1112,12 +1139,22 @@ def perform_single_analysis(request: AnalysisRequest, mode):
         last_data = analyze_period(aoi, last_start, last_end, mode)
         trend_stats = calculate_trend_statistics(current_data_flagged, last_data) or {}
         
-        # Start/End Year Maps
+        # Start/End Year Maps and Period Statistics
         start_year_end = (start_obj + relativedelta(years=1)).strftime("%Y-%m-%d")
         maps_start = generate_map_url(aoi, request.startDate, start_year_end, mode, wetland_name)
         end_year_start = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
         maps_end = generate_map_url(aoi, end_year_start, request.endDate, mode, wetland_name)
         
+        # Calculate distinct initial vs final period statistics directly from time series
+        initial_points = [d for d in current_data_flagged if d.get('date', '') <= start_year_end and d.get('value') is not None]
+        final_points = [d for d in current_data_flagged if d.get('date', '') >= end_year_start and d.get('value') is not None]
+        initial_stats = calculate_robust_statistics(initial_points) if len(initial_points) >= 2 else current_stats
+        final_stats = calculate_robust_statistics(final_points) if len(final_points) >= 2 else current_stats
+        
+        init_med = initial_stats.get('median', current_stats['median'])
+        fin_med = final_stats.get('median', current_stats['median'])
+        delta_init_final = fin_med - init_med
+
         maps = {
             "rgb": maps_end["rgb"],
             "metric": maps_end["metric"],
@@ -1137,16 +1174,19 @@ def perform_single_analysis(request: AnalysisRequest, mode):
         result = {
             "mode": mode,
             "stats": {
-                "current": safe_float(current_stats['median']),
-                "current_mean": safe_float(current_stats['mean']),
-                "current_std": safe_float(current_stats['std']),
-                "last": safe_float(trend_stats.get('previous_median', 0)),
-                "trend": safe_float(trend_stats.get('trend', 0)),
-                "trend_delta": safe_float(trend_stats.get('absolute_change', 0)),
+                "current": safe_float(fin_med),
+                "current_mean": safe_float(final_stats.get('mean', current_stats['mean'])),
+                "current_std": safe_float(final_stats.get('std', current_stats['std'])),
+                "initial": safe_float(init_med),
+                "initial_mean": safe_float(initial_stats.get('mean', current_stats['mean'])),
+                "initial_std": safe_float(initial_stats.get('std', current_stats['std'])),
+                "last": safe_float(trend_stats.get('previous_median', init_med)),
+                "trend": safe_float(trend_stats.get('trend', delta_init_final)),
+                "trend_delta": safe_float(delta_init_final),
                 "sen_slope": safe_float(trend_stats.get('sen_slope_per_year', 0)),
                 "outlier_count": outlier_count,
                 "data_count": current_stats['count'],
-                "cv": safe_float(current_stats['cv'])
+                "cv": safe_float(final_stats.get('cv', current_stats['cv']))
             },
             "time_series": current_data_flagged,
             "maps": maps,
@@ -1278,9 +1318,19 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
             timeout=25
         )
         
-        # Fallback if the date window has 0 acquisitions with strictly 0.00% cloud cover
-        if resp.status_code != 200 or not resp.content or len(resp.content) < 1000:
+        # Fallback 1: if the date window has 0 acquisitions with strictly 0.00% cloud cover
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 800:
             payload["input"]["data"][0]["dataFilter"]["maxCloudCoverage"] = 15
+            resp = http_session.post(
+                "https://sh.dataspace.copernicus.eu/api/v1/process",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=25
+            )
+
+        # Fallback 2: if still no acquisitions found, relax to leastCC across all available imagery
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 800:
+            payload["input"]["data"][0]["dataFilter"].pop("maxCloudCoverage", None)
             resp = http_session.post(
                 "https://sh.dataspace.copernicus.eu/api/v1/process",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},

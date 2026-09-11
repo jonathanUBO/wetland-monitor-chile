@@ -946,7 +946,7 @@ export default function Dashboard() {
             const url = window.URL.createObjectURL(new Blob([res.data]));
             const link = document.createElement('a');
             link.href = url;
-            link.setAttribute('download', `Reporte_${selectedWetland.name.replace(/\s+/g, '_')}_${endDate}.docx`);
+            link.setAttribute('download', `Reporte_Comparativo_${selectedWetland.name.replace(/\s+/g, '_')}_${startDate}_a_${endDate}.docx`);
             document.body.appendChild(link);
             link.click();
             link.remove();

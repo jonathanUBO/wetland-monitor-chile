@@ -1047,7 +1047,7 @@ def analyze_period(aoi, start_date, end_date, mode):
 
 def generate_map_url(aoi, start, end, mode, wetland_name=None):
     """Generate absolute URL map tile paths for RGB and metric visualization."""
-    BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+    BASE_URL = (os.getenv("BACKEND_URL") or os.getenv("RENDER_EXTERNAL_URL") or "https://wetland-monitor-chile.onrender.com").rstrip("/")
     suffix = f"?wetland={wetland_name}" if wetland_name else ""
     return {
         "rgb": f"{BASE_URL}/api/tiles/rgb/{start}/{end}/{{z}}/{{x}}/{{y}}{suffix}",

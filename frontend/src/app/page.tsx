@@ -31,6 +31,17 @@ import {
 } from 'recharts';
 import axios from 'axios';
 
+// Helper — dynamically resolve API URL (prioritizes Render backend in production/Vercel)
+const getApiUrl = (): string => {
+    const envUrl = process.env.NEXT_PUBLIC_API_URL;
+    if (envUrl && !envUrl.includes('tu-backend.railway.app') && !envUrl.includes('localhost')) {
+        return envUrl.replace(/\/$/, '');
+    }
+    if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        return 'https://wetland-monitor-chile.onrender.com';
+    }
+    return (envUrl || 'http://localhost:8000').replace(/\/$/, '');
+};
 
 // --- TYPES ---
 interface TimeSeriesPoint {
@@ -464,7 +475,7 @@ export default function Dashboard() {
             .catch(console.error);
 
         // Check CDSE credentials status
-        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        const API = getApiUrl();
         axios.get(`${API}/credentials-status`)
             .then(r => {
                 setCdseConfigured(r.data.configured);
@@ -525,7 +536,7 @@ export default function Dashboard() {
         setVerifyingCreds(true);
         setCdseError(null);
         setCdseSuccess(null);
-        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        const API = getApiUrl();
         try {
             const res = await axios.post(`${API}/verify-credentials`, {
                 username: cdseUsername,
@@ -546,7 +557,7 @@ export default function Dashboard() {
         setSavingCreds(true);
         setCdseError(null);
         setCdseSuccess(null);
-        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        const API = getApiUrl();
         try {
             await axios.post(`${API}/set-credentials`, {
                 username: cdseUsername,
@@ -570,7 +581,7 @@ export default function Dashboard() {
     const handleFileUpload = async (file: File) => {
         setUploadingFile(true);
         setFileError(null);
-        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        const API = getApiUrl();
         const formData = new FormData();
         formData.append('file', file);
         try {
@@ -687,7 +698,7 @@ export default function Dashboard() {
         try {
             setProcessLog(prev => [...prev, "⚙️  Procesando todos los índices con CDSE..."]);
             // Use analyze-all endpoint
-            const res = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/analyze-all`, payload);
+            const res = await axios.post(`${getApiUrl()}/analyze-all`, payload);
 
             if (res.data.status === 'success') {
                 const data = res.data.data;
@@ -743,7 +754,7 @@ export default function Dashboard() {
                 end_date: endDate
             };
 
-            const res = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/generate-report`, reportPayload, {
+            const res = await axios.post(`${getApiUrl()}/generate-report`, reportPayload, {
                 responseType: 'blob'
             });
 

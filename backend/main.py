@@ -1046,13 +1046,38 @@ def analyze_period(aoi, start_date, end_date, mode):
     return final_series
 
 def generate_map_url(aoi, start, end, mode, wetland_name=None):
-    """Generate absolute URL map tile paths for RGB and metric visualization."""
+    """Generate absolute URL map paths for RGB, metric tiles, and fast single-image overlays."""
     BASE_URL = (os.getenv("BACKEND_URL") or os.getenv("RENDER_EXTERNAL_URL") or "https://wetland-monitor-chile.onrender.com").rstrip("/")
     suffix = f"?wetland={wetland_name}" if wetland_name else ""
+    
+    overlay_coords = None
+    bbox_str = None
+    try:
+        import shapely.geometry as sg
+        geom = sg.shape(aoi)
+        minx, miny, maxx, maxy = geom.bounds
+        # Coordinates in clockwise order: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+        overlay_coords = [
+            [minx, maxy],
+            [maxx, maxy],
+            [maxx, miny],
+            [minx, miny]
+        ]
+        bbox_str = f"{minx:.6f},{miny:.6f},{maxx:.6f},{maxy:.6f}"
+    except Exception:
+        overlay_coords = None
+
+    ov_suffix = suffix if wetland_name else (f"?bbox={bbox_str}" if bbox_str else "")
+
     return {
         "rgb": f"{BASE_URL}/api/tiles/rgb/{start}/{end}/{{z}}/{{x}}/{{y}}{suffix}",
         "metric": f"{BASE_URL}/api/tiles/metric/{mode}/{start}/{end}/{{z}}/{{x}}/{{y}}{suffix}",
-        "thumb_url": f"{BASE_URL}/api/thumb/{mode}/{start}/{end}{suffix}"
+        "thumb_url": f"{BASE_URL}/api/thumb/{mode}/{start}/{end}{suffix}",
+        "overlay": {
+            "rgb_url": f"{BASE_URL}/api/overlay/RGB/{start}/{end}{ov_suffix}",
+            "metric_url": f"{BASE_URL}/api/overlay/{mode}/{start}/{end}{ov_suffix}",
+            "coordinates": overlay_coords
+        } if overlay_coords else None
     }
 
 def perform_single_analysis(request: AnalysisRequest, mode):
@@ -1090,7 +1115,8 @@ def perform_single_analysis(request: AnalysisRequest, mode):
             "rgb": maps_end["rgb"],
             "metric": maps_end["metric"],
             "start_year": maps_start,
-            "end_year": maps_end
+            "end_year": maps_end,
+            "overlay": maps_end.get("overlay")
         }
         
         def safe_float(v, fallback=0):
@@ -1169,12 +1195,126 @@ async def analyze(request: AnalysisRequest, authorization: str = Header(None)):
     except Exception as e:
         raise HTTPException(500, detail=str(e))
 
+# ==========================================
+# MODULE: FAST OVERLAYS, TILES & CACHING
+# ==========================================
+_tile_cache: Dict[str, bytes] = {}
+_overlay_cache: Dict[str, bytes] = {}
+_cache_lock = threading.Lock()
+_inflight_overlays: Dict[str, threading.Event] = {}
+_MAX_CACHE_SIZE = 3000
+
+def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[float]) -> Optional[bytes]:
+    """Fetch or retrieve from RAM cache a high-speed BBOX composite PNG."""
+    cache_key = f"{mode}_{start_date[:10]}_{end_date[:10]}_{bounds[0]:.4f}_{bounds[1]:.4f}_{bounds[2]:.4f}_{bounds[3]:.4f}"
+    
+    with _cache_lock:
+        if cache_key in _overlay_cache:
+            return _overlay_cache[cache_key]
+        event = _inflight_overlays.get(cache_key)
+        if event is None:
+            event = threading.Event()
+            _inflight_overlays[cache_key] = event
+            is_initiator = True
+        else:
+            is_initiator = False
+
+    if not is_initiator:
+        event.wait(timeout=25)
+        with _cache_lock:
+            return _overlay_cache.get(cache_key)
+
+    try:
+        token = get_cdse_token()
+        evalscript = get_evalscript(mode, is_process=True)
+        
+        minx, miny, maxx, maxy = bounds
+        lon_span = abs(maxx - minx)
+        lat_span = abs(maxy - miny) * math.cos(math.radians((miny + maxy) / 2)) if abs(miny + maxy) > 0.001 else abs(maxy - miny)
+        aspect = max(0.2, min(5.0, lon_span / lat_span if lat_span > 1e-6 else 1.0))
+        
+        # Target 768px for crisp high-density display without heavy transfer
+        if aspect >= 1.0:
+            width = 768
+            height = max(128, min(768, int(768 / aspect)))
+        else:
+            height = 768
+            width = max(128, min(768, int(768 * aspect)))
+
+        payload = {
+            "input": {
+                "bounds": {
+                    "bbox": bounds,
+                    "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+                },
+                "data": [{
+                    "type": "sentinel-2-l2a",
+                    "dataFilter": {
+                        "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
+                        "maxCloudCoverage": 25,
+                        "mosaickingOrder": "mostRecent"
+                    }
+                }]
+            },
+            "output": {
+                "width": width,
+                "height": height,
+                "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
+            },
+            "evalscript": evalscript
+        }
+
+        resp = http_session.post(
+            "https://sh.dataspace.copernicus.eu/api/v1/process",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=25
+        )
+        if resp.status_code == 200 and resp.content:
+            with _cache_lock:
+                if len(_overlay_cache) > _MAX_CACHE_SIZE:
+                    keys = list(_overlay_cache.keys())[:int(_MAX_CACHE_SIZE * 0.2)]
+                    for k in keys: _overlay_cache.pop(k, None)
+                _overlay_cache[cache_key] = resp.content
+            return resp.content
+        else:
+            logger.warning(f"Overlay fetch returned {resp.status_code} for {mode}: {resp.text[:200]}")
+            return None
+    except Exception as e:
+        logger.error(f"Error fetching overlay for {mode}: {e}")
+        return None
+    finally:
+        with _cache_lock:
+            _inflight_overlays.pop(cache_key, None)
+            event.set()
+
 @app.post("/analyze-all")
 async def analyze_all(request: AnalysisRequest, authorization: str = Header(None)):
     try:
         results = {}
         modes = ["Hydrology", "Vegetation", "WaterQuality", "SoilVegetation", "AlgaeBloom", "WaterRatio"]
         
+        # Concurrent pre-fetch of overlays in background ThreadPool:
+        # Pre-loads RGB + all 6 modes in RAM so frontend gets them in <5ms
+        try:
+            import shapely.geometry as sg
+            aoi_dict = request.geojson.get("geometry") or request.geojson
+            aoi_geom = sg.shape(aoi_dict)
+            aoi_bounds = list(aoi_geom.bounds)
+            
+            end_dt = datetime.strptime(request.endDate[:10], "%Y-%m-%d")
+            ey_start = (end_dt - relativedelta(years=1)).strftime("%Y-%m-%d")
+            
+            prefetch_modes = ["RGB"] + modes
+            def _prefetch_task(m):
+                get_overlay_bytes(m, ey_start, request.endDate, aoi_bounds)
+                
+            prefetch_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+            for m in prefetch_modes:
+                prefetch_executor.submit(_prefetch_task, m)
+        except Exception as pfe:
+            logger.warning(f"Could not initialize overlay prefetch: {pfe}")
+
         for m in modes:
             logger.info(log_process_stage('', m, 'processing'))
             results[m] = perform_single_analysis(request, m)
@@ -1185,8 +1325,50 @@ async def analyze_all(request: AnalysisRequest, authorization: str = Header(None
         logger.error(f"Analyze-all Error: {e}")
         raise HTTPException(500, detail=f"Backend Error: {str(e)}")
 
+@app.get("/api/overlay/{mode}/{start_date}/{end_date}")
+async def get_overlay(
+    mode: str, 
+    start_date: str, 
+    end_date: str, 
+    wetland: Optional[str] = None, 
+    bbox: Optional[str] = None
+):
+    """Serve a high-speed georeferenced composite PNG covering the wetland bounding box.
+    Returns Cache-Control headers for instant client-side rendering.
+    """
+    bounds = None
+    if wetland:
+        geom_dict = get_wetland_geometry(wetland)
+        if geom_dict:
+            try:
+                import shapely.geometry as sg
+                bounds = list(sg.shape(geom_dict).bounds)
+            except Exception:
+                bounds = None
+    elif bbox:
+        try:
+            parts = [float(x.strip()) for x in bbox.split(",")]
+            if len(parts) == 4:
+                bounds = parts
+        except Exception:
+            bounds = None
+
+    if not bounds:
+        raise HTTPException(400, "Must provide 'wetland' or valid 'bbox=minx,miny,maxx,maxy'")
+
+    content = await asyncio.to_thread(get_overlay_bytes, mode, start_date, end_date, bounds)
+    if not content:
+        raise HTTPException(502, f"Could not retrieve satellite imagery for {mode}")
+
+    return Response(
+        content=content,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=604800, stale-while-revalidate=86400, immutable"
+        }
+    )
+
 # TILE PROXY
-from fastapi.responses import Response
 def xyz_to_bbox(x, y, z):
     n = 2.0 ** z
     lon_left = x / n * 360.0 - 180.0
@@ -1197,14 +1379,20 @@ def xyz_to_bbox(x, y, z):
 
 @app.get("/api/tiles/rgb/{start_date}/{end_date}/{z}/{x}/{y}")
 async def get_rgb_tile(start_date: str, end_date: str, z: int, x: int, y: int, wetland: str = None):
-    """Serve an RGB Sentinel-2 tile for the given date range and tile coordinates."""
+    """Serve an RGB Sentinel-2 tile with RAM caching and browser cache-control."""
+    cache_key = f"rgb_{start_date[:10]}_{end_date[:10]}_{z}_{x}_{y}"
+    
+    with _cache_lock:
+        if cache_key in _tile_cache:
+            return Response(
+                content=_tile_cache[cache_key],
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=604800, immutable"}
+            )
+            
     token = get_cdse_token()
     bbox = xyz_to_bbox(x, y, z)
     evalscript = get_evalscript("RGB", is_process=True)
-    
-    geometry = None
-    if wetland:
-        geometry = get_wetland_geometry(wetland)
 
     url = "https://sh.dataspace.copernicus.eu/api/v1/process"
     payload = {
@@ -1217,7 +1405,8 @@ async def get_rgb_tile(start_date: str, end_date: str, z: int, x: int, y: int, w
                 "type": "sentinel-2-l2a",
                 "dataFilter": {
                     "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                    "maxCloudCoverage": 20
+                    "maxCloudCoverage": 25,
+                    "mosaickingOrder": "mostRecent"
                 }
             }]
         },
@@ -1228,14 +1417,20 @@ async def get_rgb_tile(start_date: str, end_date: str, z: int, x: int, y: int, w
         },
         "evalscript": evalscript
     }
-    
-    if geometry:
-        payload["input"]["bounds"]["geometry"] = geometry
 
     try:
-        resp = http_session.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=payload, timeout=30)
+        resp = http_session.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=payload, timeout=25)
         if resp.status_code == 200:
-            return Response(content=resp.content, media_type="image/png")
+            with _cache_lock:
+                if len(_tile_cache) > _MAX_CACHE_SIZE:
+                    keys = list(_tile_cache.keys())[:int(_MAX_CACHE_SIZE * 0.2)]
+                    for k in keys: _tile_cache.pop(k, None)
+                _tile_cache[cache_key] = resp.content
+            return Response(
+                content=resp.content,
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=604800, immutable"}
+            )
         else:
             logger.error(f"RGB tile error {resp.status_code}: {resp.text[:200]}")
             return Response(content=b"", media_type="image/png", status_code=resp.status_code)
@@ -1245,14 +1440,20 @@ async def get_rgb_tile(start_date: str, end_date: str, z: int, x: int, y: int, w
 
 @app.get("/api/tiles/metric/{mode}/{start_date}/{end_date}/{z}/{x}/{y}")
 async def get_metric_tile(mode: str, start_date: str, end_date: str, z: int, x: int, y: int, wetland: str = None):
-    """Serve a spectral index tile for the given mode, date range, and tile coordinates."""
+    """Serve a spectral index tile with RAM caching and browser cache-control."""
+    cache_key = f"{mode}_{start_date[:10]}_{end_date[:10]}_{z}_{x}_{y}"
+    
+    with _cache_lock:
+        if cache_key in _tile_cache:
+            return Response(
+                content=_tile_cache[cache_key],
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=604800, immutable"}
+            )
+
     token = get_cdse_token()
     bbox = xyz_to_bbox(x, y, z)
     evalscript = get_evalscript(mode, is_process=True)
-    
-    geometry = None
-    if wetland:
-        geometry = get_wetland_geometry(wetland)
 
     url = "https://sh.dataspace.copernicus.eu/api/v1/process"
     payload = {
@@ -1265,7 +1466,8 @@ async def get_metric_tile(mode: str, start_date: str, end_date: str, z: int, x: 
                 "type": "sentinel-2-l2a",
                 "dataFilter": {
                     "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                    "maxCloudCoverage": 20
+                    "maxCloudCoverage": 25,
+                    "mosaickingOrder": "mostRecent"
                 }
             }]
         },
@@ -1276,14 +1478,20 @@ async def get_metric_tile(mode: str, start_date: str, end_date: str, z: int, x: 
         },
         "evalscript": evalscript
     }
-    
-    if geometry:
-        payload["input"]["bounds"]["geometry"] = geometry
 
     try:
-        resp = http_session.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=payload, timeout=30)
+        resp = http_session.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=payload, timeout=25)
         if resp.status_code == 200:
-            return Response(content=resp.content, media_type="image/png")
+            with _cache_lock:
+                if len(_tile_cache) > _MAX_CACHE_SIZE:
+                    keys = list(_tile_cache.keys())[:int(_MAX_CACHE_SIZE * 0.2)]
+                    for k in keys: _tile_cache.pop(k, None)
+                _tile_cache[cache_key] = resp.content
+            return Response(
+                content=resp.content,
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=604800, immutable"}
+            )
         else:
             logger.error(f"Metric tile error {resp.status_code}: {resp.text[:200]}")
             return Response(content=b"", media_type="image/png", status_code=resp.status_code)
@@ -1297,7 +1505,11 @@ async def get_thumbnail(mode: str, start_date: str, end_date: str, wetland: str 
     img_io = await asyncio.to_thread(fetch_thumbnail_bytes, mode, start_date, end_date, None, wetland)
     if not img_io:
         return Response(content=b"", media_type="image/png", status_code=404)
-    return Response(content=img_io.getvalue(), media_type="image/png")
+    return Response(
+        content=img_io.getvalue(), 
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=604800, stale-while-revalidate=86400, immutable"}
+    )
 
 @app.post("/verify-credentials")
 async def verify_credentials(payload: dict):

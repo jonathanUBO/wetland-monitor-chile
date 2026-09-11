@@ -89,8 +89,14 @@ interface ModeResult {
     maps: {
         rgb: string;
         metric: string;
-        start_year?: { rgb: string; metric: string };
-        end_year?: { rgb: string; metric: string };
+        start_year?: { rgb: string; metric: string; overlay?: any };
+        end_year?: { rgb: string; metric: string; overlay?: any };
+        overlay?: {
+            rgb_url: string;
+            metric_url: string;
+            coordinates: [[number, number], [number, number], [number, number], [number, number]];
+        };
+        thumb_url?: string;
     };
     coverage?: {
         valid: boolean;
@@ -301,25 +307,33 @@ interface IndexCardProps {
 
 const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeometry }: IndexCardProps) => {
 
-    // Memoize the GeoJSON Feature for the wetland perimeter
+    // Memoize the GeoJSON FeatureCollection for the wetland perimeter
     const boundaryGeoJson = React.useMemo(() => {
         if (!boundaryGeometry) return null;
         return {
-            type: 'Feature' as const,
-            geometry: boundaryGeometry,
-            properties: {}
+            type: 'FeatureCollection' as const,
+            features: [
+                {
+                    type: 'Feature' as const,
+                    geometry: boundaryGeometry,
+                    properties: {}
+                }
+            ]
         };
     }, [boundaryGeometry]);
 
-    // Determine which map tiles to use
+    // Fast Single-Image Overlay (BBOX composite, instant load)
+    let overlayData = res?.maps?.overlay;
     let rgbTile = res?.maps?.rgb;
     let metricTile = res?.maps?.metric;
 
     // If backend provided specific year maps
     if (viewYear === 'start' && res?.maps?.start_year) {
+        overlayData = res.maps.start_year.overlay || overlayData;
         rgbTile = res.maps.start_year.rgb;
         metricTile = res.maps.start_year.metric;
     } else if (viewYear === 'end' && res?.maps?.end_year) {
+        overlayData = res.maps.end_year.overlay || overlayData;
         rgbTile = res.maps.end_year.rgb;
         metricTile = res.maps.end_year.metric;
     }
@@ -383,8 +397,47 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                     attributionControl={false}
                     reuseMaps={true}
                 >
-                    {res && rgbTile && metricTile && (
-                        <React.Fragment key={`${mode.id}-${viewYear}`}>
+                    {/* 1. FAST SINGLE-IMAGE OVERLAYS (INSTANT LOAD) */}
+                    {res && overlayData?.coordinates && (
+                        <React.Fragment key={`overlay-${mode.id}-${viewYear}`}>
+                            {overlayData.rgb_url && (
+                                <Source
+                                    key={`src-ov-rgb-${mode.id}-${viewYear}-${overlayData.rgb_url}`}
+                                    id={`${mode.id}-ov-rgb`}
+                                    type="image"
+                                    url={overlayData.rgb_url}
+                                    coordinates={overlayData.coordinates}
+                                >
+                                    <Layer
+                                        id={`${mode.id}-ov-rgb-layer`}
+                                        type="raster"
+                                        paint={{ 'raster-opacity': 0.65 }}
+                                        beforeId={boundaryGeoJson ? `boundary-fill-${mode.id}` : undefined}
+                                    />
+                                </Source>
+                            )}
+                            {overlayData.metric_url && (
+                                <Source
+                                    key={`src-ov-metric-${mode.id}-${viewYear}-${overlayData.metric_url}`}
+                                    id={`${mode.id}-ov-metric`}
+                                    type="image"
+                                    url={overlayData.metric_url}
+                                    coordinates={overlayData.coordinates}
+                                >
+                                    <Layer
+                                        id={`${mode.id}-ov-metric-layer`}
+                                        type="raster"
+                                        paint={{ 'raster-opacity': 0.85 }}
+                                        beforeId={boundaryGeoJson ? `boundary-fill-${mode.id}` : undefined}
+                                    />
+                                </Source>
+                            )}
+                        </React.Fragment>
+                    )}
+
+                    {/* 2. SLIPPY TILE RASTER LAYERS (FALLBACK OR COMPLEMENT) */}
+                    {res && (!overlayData?.coordinates) && rgbTile && metricTile && (
+                        <React.Fragment key={`tiles-${mode.id}-${viewYear}`}>
                             <Source
                                 key={`src-rgb-${mode.id}-${viewYear}-${rgbTile}`}
                                 id={`${mode.id}-rgb`}
@@ -396,6 +449,7 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                     id={`${mode.id}-rgb-layer`}
                                     type="raster"
                                     paint={{ 'raster-opacity': 0.6 }}
+                                    beforeId={boundaryGeoJson ? `boundary-fill-${mode.id}` : undefined}
                                 />
                             </Source>
                             <Source
@@ -409,11 +463,13 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                     id={`${mode.id}-metric-layer`}
                                     type="raster"
                                     paint={{}}
+                                    beforeId={boundaryGeoJson ? `boundary-fill-${mode.id}` : undefined}
                                 />
                             </Source>
                         </React.Fragment>
                     )}
-                    {/* WETLAND BOUNDARY VECTOR OVERLAY */}
+
+                    {/* 3. WETLAND BOUNDARY VECTOR OVERLAY - ALWAYS ON TOP WITH HIGH CONTRAST */}
                     {boundaryGeoJson && (
                         <Source
                             key={`boundary-src-${mode.id}`}
@@ -425,8 +481,8 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                 id={`boundary-fill-${mode.id}`}
                                 type="fill"
                                 paint={{
-                                    'fill-color': '#0ea5e9',
-                                    'fill-opacity': 0.08
+                                    'fill-color': '#00f5ff',
+                                    'fill-opacity': 0.12
                                 }}
                             />
                             <Layer
@@ -434,16 +490,16 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                                 type="line"
                                 paint={{
                                     'line-color': '#000000',
-                                    'line-width': 4,
-                                    'line-opacity': 0.75
+                                    'line-width': 4.5,
+                                    'line-opacity': 0.85
                                 }}
                             />
                             <Layer
                                 id={`boundary-line-${mode.id}`}
                                 type="line"
                                 paint={{
-                                    'line-color': '#38bdf8',
-                                    'line-width': 2.2,
+                                    'line-color': '#00f5ff',
+                                    'line-width': 2.6,
                                     'line-opacity': 1.0
                                 }}
                             />
@@ -469,7 +525,13 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
                 </GlassPanel>
             </div>
 
-            {!res && <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-20 text-[9px] text-gray-500 uppercase tracking-widest backdrop-blur-sm">Esperando Datos</div>}
+            {/* CLEAN STATUS BADGE (DOES NOT OBSTRUCT MAP OR BOUNDARY) */}
+            {!res && (
+                <div className="absolute top-14 left-2.5 z-10 pointer-events-none flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-md border border-cyan-500/30 text-[9px] font-mono text-cyan-300 shadow-md">
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                    <span>{boundaryGeometry ? 'Perímetro Delimitado' : 'Esperando Selección'}</span>
+                </div>
+            )}
         </div>
     );
 };

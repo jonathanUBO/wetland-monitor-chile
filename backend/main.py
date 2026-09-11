@@ -1,52 +1,35 @@
 import os
 import sys
-import ee
 import json
 import math
 import logging
 import io
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import threading
+import time
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-import concurrent.futures
-from statsmodels.tsa.seasonal import STL
-import ruptures as rpt
-from scipy import stats
 
+import asyncio
+import concurrent.futures
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from dateutil.relativedelta import relativedelta
 
-from fastapi import FastAPI, HTTPException, Header, File, UploadFile
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
-
-import geopandas as gpd
-import tempfile
-import shutil
-import zipfile
-import fiona
-import pandas as pd
-from shapely.ops import transform
-
-def to_2d(x, y, z=None):
-    """Force 2D coordinates for GE compatibility."""
-    return (x, y)
-
-fiona.drvsupport.supported_drivers['KML'] = 'rw' # Enable KML support
-fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
 
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # ==========================================
 # MODULE: UTILS & LOGGING
@@ -59,6 +42,13 @@ def setup_logging(log_file: str = 'wetland_analysis.log', level: int = logging.I
     if logger.handlers:
         return logger
     
+    # Ensure stdout handles UTF-8 gracefully on Windows without charmap encoding crashes
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
     detailed_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -106,7 +96,7 @@ def create_error_response(error: Exception, mode: str = None) -> dict:
 
 def log_process_stage(stage: str, mode: str = None, status: str = 'processing') -> str:
     """Create formatted log message for process stages."""
-    icons = {'processing': '⚙️', 'completed': '✓', 'error': '✗', 'info': 'ℹ️'}
+    icons = {'processing': '[*]', 'completed': '[OK]', 'error': '[ERR]', 'info': '[i]'}
     icon = icons.get(status, '')
     timestamp = datetime.now().strftime("%H:%M:%S")
     
@@ -123,6 +113,44 @@ def log_process_stage(stage: str, mode: str = None, status: str = 'processing') 
 
 # Initialize Logger
 logger = setup_logging()
+
+# ==========================================
+# MODULE: CATALOGUE & GEOMETRY
+# ==========================================
+
+WETLANDS_CATALOGUE_PATH = Path("../frontend/public/wetlands.json")
+_wetlands_cache = None
+
+def load_wetlands_catalogue():
+    global _wetlands_cache
+    if _wetlands_cache is not None:
+        return _wetlands_cache
+    
+    try:
+        # Try both relative to current and absolute based on workspace structure
+        paths_to_try = [
+            WETLANDS_CATALOGUE_PATH,
+            Path("wetlands.json"),
+            Path("d:/Proyectos_software/wetland-monitor-chile/frontend/public/wetlands.json")
+        ]
+        
+        for p in paths_to_try:
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    _wetlands_cache = data
+                    return data
+    except Exception as e:
+        logger.error(f"Error loading wetlands catalogue: {e}")
+    return []
+
+def get_wetland_geometry(name_or_code: str) -> Optional[dict]:
+    """Retrieve geometry for a wetland by name or code from catalogue."""
+    catalogue = load_wetlands_catalogue()
+    for w in catalogue:
+        if str(w.get("name")) == name_or_code or str(w.get("code")) == name_or_code:
+            return w.get("geometry")
+    return None
 
 # ==========================================
 # MODULE: VALIDATORS
@@ -145,36 +173,21 @@ def validate_date_range(start_date_str: str, end_date_str: str, max_range_days: 
     
     if (end_date - start_date).days < 7:
         raise ValidationError("Date range must be at least 7 days")
+
+    SENTINEL2_LAUNCH_DATE = datetime(2015, 6, 23)
+    if start_date < SENTINEL2_LAUNCH_DATE:
+        raise ValidationError("La constelación Sentinel-2 inició operaciones el 23 de junio de 2015. La fecha de inicio debe ser a partir de julio de 2015.")
         
     return start_date, end_date
 
-def validate_geometry(geojson: Dict[str, Any], min_area_km2: float = 0.01, max_area_km2: float = 1000) -> ee.Geometry:
+def validate_geometry(geojson: Dict[str, Any], min_area_km2: float = 0.01, max_area_km2: float = 1000) -> Dict[str, Any]:
     """Validate GeoJSON geometry for analysis."""
     try:
         geometry = geojson.get('geometry')
         if not geometry:
-            logger.error("Missing 'geometry' field in GeoJSON")
             raise ValidationError("Missing 'geometry' field in GeoJSON")
-        
-        geom_type = geometry.get('type')
-        
-        # Force 2D geometries (GEE can fail with 3D from KML)
-        # Simple recursion to strip Z if present in coordinates
-        def strip_z(coords):
-            if not isinstance(coords, (list, tuple)):
-                return coords
-            if len(coords) > 0 and isinstance(coords[0], (int, float)):
-                return list(coords[:2])
-            return [strip_z(c) for c in coords]
-        
-        if 'coordinates' in geometry:
-            geometry['coordinates'] = strip_z(geometry['coordinates'])
-
-        aoi = ee.Geometry(geometry)
-        aoi = aoi.simplify(maxError=1)
-        return aoi
+        return geometry
     except Exception as e:
-        logger.error(f"Geometry validation failed: {e}")
         raise ValidationError(f"Geometry validation failed: {e}")
 
 # ==========================================
@@ -184,16 +197,12 @@ def validate_geometry(geojson: Dict[str, Any], min_area_km2: float = 0.01, max_a
 def calculate_robust_statistics(data: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
     """Calculate robust statistics resistant to outliers."""
     values = [d['value'] for d in data if d.get('value') is not None]
-    if len(values) < 1: return None
+    if len(values) < 3: return None
     
     values_array = np.array(values)
     mean_val = np.mean(values_array)
     std_val = np.std(values_array)
-    
-    # Robust CV: Use absolute mean to avoid negative CVs
-    # If mean is extremely close to zero, CV becomes less meaningful
-    abs_mean = abs(mean_val)
-    cv = (std_val / abs_mean * 100) if abs_mean > 1e-6 else 0
+    cv = (std_val / mean_val * 100) if mean_val != 0 else 0
     p25 = np.percentile(values_array, 25)
     p75 = np.percentile(values_array, 75)
     
@@ -208,25 +217,99 @@ def calculate_robust_statistics(data: List[Dict[str, Any]]) -> Optional[Dict[str
         'iqr': float(p75 - p25)
     }
 
-def detect_outliers(data: List[Dict[str, Any]], method: str = 'iqr', threshold: float = 1.5) -> List[Dict[str, Any]]:
-    """Detect and flag outliers in time series data."""
-    values = [d['value'] for d in data if d.get('value') is not None]
-    if len(values) < 4:
+def calculate_sen_slope(dates: List[str], values: List[float]) -> float:
+    """Calculate Sen's slope estimator (rate of change in index value per year).
+    Robust non-parametric estimator (Sen, 1968; Theil, 1950) immune to missing data and non-normality.
+    """
+    if len(values) < 3:
+        return 0.0
+    t = []
+    for d in dates:
+        try:
+            dt = datetime.strptime(d[:10], '%Y-%m-%d')
+            year_fraction = dt.year + (dt.timetuple().tm_yday - 1) / 365.25
+            t.append(year_fraction)
+        except Exception:
+            continue
+            
+    if len(t) != len(values):
+        return 0.0
+
+    slopes = []
+    n = len(values)
+    for i in range(n):
+        for j in range(i + 1, n):
+            dt = t[j] - t[i]
+            if dt > 0.01: # at least ~4 days apart
+                slopes.append((values[j] - values[i]) / dt)
+    if not slopes:
+        return 0.0
+    return float(np.median(slopes))
+
+def get_southern_season(month: int) -> str:
+    """Classify month into Southern Hemisphere meteorological season."""
+    if month in (12, 1, 2):
+        return 'summer'  # Verano (DJF)
+    elif month in (3, 4, 5):
+        return 'autumn'  # Otoño (MAM)
+    elif month in (6, 7, 8):
+        return 'winter'  # Invierno (JJA)
+    else:
+        return 'spring'  # Primavera (SON)
+
+def detect_outliers(data: List[Dict[str, Any]], method: str = 'seasonal_iqr', threshold: float = 1.5) -> List[Dict[str, Any]]:
+    """Detect and flag outliers in time series data with seasonal awareness.
+    Preserves natural seasonal hydroperiod pulses (winter floods, summer lows)
+    while flagging true sensor artifacts or residual contamination.
+    """
+    valid_points = [d for d in data if d.get('value') is not None]
+    if len(valid_points) < 4:
         for d in data: d['is_outlier'] = False
         return data
-    
-    values_array = np.array(values)
-    q1 = np.percentile(values_array, 25)
-    q3 = np.percentile(values_array, 75)
-    iqr = q3 - q1
-    lower = q1 - threshold * iqr
-    upper = q3 + threshold * iqr
-    
-    for d in data:
-        if d.get('value') is not None:
-            d['is_outlier'] = bool(d['value'] < lower or d['value'] > upper)
+
+    # Partition by season
+    seasonal_groups: Dict[str, List[float]] = {'summer': [], 'autumn': [], 'winter': [], 'spring': []}
+    for d in valid_points:
+        try:
+            m = int(d['date'][5:7])
+            season = get_southern_season(m)
+            seasonal_groups[season].append(d['value'])
+        except Exception:
+            pass
+
+    # Overall series fallback bounds
+    all_vals = np.array([d['value'] for d in valid_points])
+    g_q1 = np.percentile(all_vals, 25)
+    g_q3 = np.percentile(all_vals, 75)
+    g_iqr = g_q3 - g_q1
+    global_lower = g_q1 - threshold * g_iqr
+    global_upper = g_q3 + threshold * g_iqr
+
+    # Season-specific bounds (if season has at least 4 observations)
+    season_bounds = {}
+    for season, s_vals in seasonal_groups.items():
+        if len(s_vals) >= 4:
+            arr = np.array(s_vals)
+            q1 = np.percentile(arr, 25)
+            q3 = np.percentile(arr, 75)
+            iqr = q3 - q1
+            season_bounds[season] = (q1 - threshold * iqr, q3 + threshold * iqr)
         else:
+            season_bounds[season] = (global_lower, global_upper)
+
+    for d in data:
+        val = d.get('value')
+        if val is None:
             d['is_outlier'] = False
+            continue
+        try:
+            m = int(d['date'][5:7])
+            season = get_southern_season(m)
+            lower, upper = season_bounds.get(season, (global_lower, global_upper))
+            d['is_outlier'] = bool(val < lower or val > upper)
+        except Exception:
+            d['is_outlier'] = bool(val < global_lower or val > global_upper)
+            
     return data
 
 def validate_temporal_coverage(data: List[Dict[str, Any]], min_days: int = 30) -> Dict[str, Any]:
@@ -247,375 +330,115 @@ def validate_temporal_coverage(data: List[Dict[str, Any]], min_days: int = 30) -
         'valid': coverage_days >= min_days,
         'reason': 'Adequate coverage' if coverage_days >= min_days else 'Insufficient coverage',
         'coverage_days': coverage_days,
-        'data_points': len(data),
-        'start_date': min(dates).strftime('%Y-%m-%d') if dates else 'N/A',
-        'end_date': max(dates).strftime('%Y-%m-%d') if dates else 'N/A'
+        'data_points': len(data)
     }
 
-def calculate_spatial_consistency(image, area, scale=10):
-    """
-    Calculate Global Moran's I for spatial autocorrelation on an Earth Engine image.
-    Helps determine if changes are clustered (real) or random noise.
-    """
-    try:
-        if not image: return 0.0
-        
-        # 1. Normalize the image (standardize)
-        stats = image.reduceRegion(reducer=ee.Reducer.mean().combine(ee.Reducer.stdDev(), "", True), geometry=area, scale=scale)
-        mean = ee.Number(stats.get('Value_mean'))
-        std = ee.Number(stats.get('Value_stdDev'))
-        
-        # Avoid division by zero
-        standardized = image.subtract(mean).divide(std.max(0.00001))
-        
-        # 2. Local Moran's I approximation via reduction
-        # Define a 3x3 kernel for adjacency
-        weights = [
-            [1, 1, 1],
-            [1, 0, 1],
-            [1, 1, 1]
-        ]
-        kernel = ee.Kernel.fixed(3, 3, weights)
-        
-        # Calculate sum of neighbors
-        neighbors_sum = standardized.reduceNeighborhood(reducer=ee.Reducer.sum(), kernel=kernel)
-        
-        # Moran's I = standardized * neighbors_sum / normalization
-        moran_image = standardized.multiply(neighbors_sum)
-        
-        # Global Moran's I (mean over area)
-        global_moran = moran_image.reduceRegion(reducer=ee.Reducer.mean(), geometry=area, scale=scale).get('Value')
-        
-        val = ee.Number(global_moran).getInfo()
-        return float(val) if val is not None else 0.0
-    except Exception as e:
-        logger.warning(f"Spatial consistency calculation failed: {e}")
-        return 0.0
-
 def calculate_trend_statistics(current_data: List[Dict], previous_data: List[Dict]) -> Optional[Dict[str, float]]:
-    """Calculate trend statistics comparing two periods with robust P-values."""
+    """Calculate scientifically robust trend statistics comparing two periods and overall time series.
+    Uses Absolute Difference Delta and Sen's Slope (Sen, 1968; Theil, 1950) to avoid zero-crossing
+    mathematical singularities in normalized remote sensing indices (-1 to +1).
+    """
     current_stats = calculate_robust_statistics(current_data)
     previous_stats = calculate_robust_statistics(previous_data)
     
-    if not current_stats: return None
+    if not current_stats or not previous_stats: return None
     
-    curr_values = [d['value'] for d in current_data if d.get('value') is not None]
-    prev_values = [d['value'] for d in previous_data if d.get('value') is not None] if previous_data else []
-    
-    # Statistical significance via T-Test
-    p_value = 1.0
-    if len(curr_values) > 1 and len(prev_values) > 1:
-        t_stat, p_val = stats.ttest_ind(curr_values, prev_values, equal_var=False)
-        p_value = float(p_val)
-
     curr_med = current_stats['median']
-    prev_med = previous_stats['median'] if previous_stats else None
+    prev_med = previous_stats['median']
+    delta = curr_med - prev_med
     
-    trend_pct = None
-    if prev_med is not None:
-        # Dampening: If previous median is near zero, use a small constant to avoid extreme percentages
-        # Increase threshold to 0.02 for more stability in dry/unproductive areas
-        denom = max(abs(prev_med), 0.02) 
-        trend_pct = ((curr_med - prev_med) / denom) * 100
-            
-    if trend_pct is not None:
-        trend_pct = max(min(trend_pct, 1000), -1000)
-    
+    # Calculate Sen's slope across current period time series (rate of change per year)
+    dates = [d['date'] for d in current_data if d.get('value') is not None]
+    vals = [d['value'] for d in current_data if d.get('value') is not None]
+    sen_slope = calculate_sen_slope(dates, vals) if len(vals) >= 3 else 0.0
+
     return {
-        'previous_median': prev_med,
-        'current_median': curr_med,
-        'trend_percent': trend_pct,
-        'p_value': p_value,
-        'is_significant': p_value < 0.05 if p_value is not None else False,
-        'absolute_change': (curr_med - prev_med) if prev_med is not None else None
+        'previous_median': float(round(prev_med, 4)),
+        'current_median': float(round(curr_med, 4)),
+        'absolute_change': float(round(delta, 4)),
+        'sen_slope_per_year': float(round(sen_slope, 4)),
+        'trend': float(round(delta, 4))  # Report absolute change as primary trend metric
     }
-
-def apply_bfast_analysis(time_series: List[Dict], mode: str) -> Optional[Dict[str, Any]]:
-    """
-    Apply a robust BFAST-like analysis to the time series.
-    Detects trend, seasonality, and breakpoints (structural changes).
-    """
-    if not time_series or len(time_series) < 12: # Minimum a year for basic trend
-        return None
-    
-    try:
-        # 1. Prepare Data
-        df = pd.DataFrame(time_series)
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date').set_index('date')
-        
-        # Ensure 'value' exists and is numeric
-        if 'value' not in df.columns: return None
-        df['value'] = pd.to_numeric(df['value'], errors='coerce')
-        # Resample to monthly to handle irregular GEE data
-        valid_count = len(df)
-        df_resampled_base = df['value'].resample('MS').mean()
-        
-        # If data is too sparse (< 30% of monthly slots filled), skip interpolation
-        if valid_count / len(df_resampled_base) < 0.3:
-            return None
-            
-        # Using PCHIP interpolation for smoother, shape-preserving environmental series
-        df_resampled = df_resampled_base.interpolate(method='pchip')
-        
-        # BFAST needs at least 2 full periods for seasonal decomposition
-        # If less, we skip seasonal and just do trend/break detection
-        has_seasonality = len(df_resampled) >= 24
-        
-        if len(df_resampled) < 6: return None # Absolute minimum
-
-        # 2. Decomposition
-        if has_seasonality:
-            # STL Decomposition (Seasonal-Trend decomposition using Loess)
-            stl = STL(df_resampled, period=12, robust=True).fit()
-            trend = stl.trend
-            seasonal = stl.seasonal
-            remainder = stl.resid
-        else:
-            # Fallback for short series: Simple rolling mean or just the original for trend
-            trend = df_resampled.rolling(window=3, min_periods=1, center=True).mean()
-            seasonal = pd.Series(0, index=df_resampled.index)
-            remainder = df_resampled - trend
-
-        # 3. Structural Change Detection (Breakpoints)
-        # Using PELT (Pruned Exact Linear Time) on the Trend component
-        # We use L2 (least squares) cost and a penalty based on data size
-        signal = trend.values.reshape(-1, 1)
-        # h (min_size) is the minimum segment length (6 months)
-        algo = rpt.Pelt(model="l2", min_size=6).fit(signal)
-        # Dynamic penalty: Lower factor for better sensitivity in wetland monitoring
-        pen = np.log(len(signal)) * 1.5 if len(signal) > 10 else 1
-        breakpoints_indices = algo.predict(pen=pen)
-        
-        # 4. Segment Analysis
-        segments = []
-        last_bk = 0
-        for bk in breakpoints_indices:
-            if bk > len(trend): bk = len(trend)
-            if bk <= last_bk: continue
-            
-            seg_data = trend.iloc[last_bk:bk]
-            if len(seg_data) >= 2:
-                x = np.arange(len(seg_data))
-                slope, intercept, r_value, p_value, std_err = stats.linregress(x, seg_data.values)
-                
-                segments.append({
-                    "start_date": trend.index[last_bk].strftime("%Y-%m-%d"),
-                    "end_date": trend.index[bk-1].strftime("%Y-%m-%d"),
-                    "slope": float(slope),
-                    "slope_label": "Incremento" if slope > 0.001 else "Descenso" if slope < -0.001 else "Estable",
-                    "r_squared": float(r_value**2),
-                    "start_val": float(seg_data.iloc[0]),
-                    "end_val": float(seg_data.iloc[-1])
-                })
-            last_bk = bk
-            
-        # 5. Abrupt Shock Detection (Anomaly detection on Remainder)
-        # We use a robust threshold based on Median Absolute Deviation (MAD)
-        mad = np.median(np.abs(remainder - np.median(remainder)))
-        # Threshold: 3.5 * MAD, but at least 0.05 to avoid reporting noise/insignificant changes
-        threshold = max(3.5 * mad, 0.05) if mad > 0 else 0.05
-        
-        shocks = []
-        if threshold > 0:
-            shock_indices = np.where(np.abs(remainder) > threshold)[0]
-            for idx in shock_indices:
-                shocks.append({
-                    "date": trend.index[idx].strftime("%Y-%m-%d"),
-                    "magnitude": float(remainder.iloc[idx]),
-                    "severity": "Alta" if abs(remainder.iloc[idx]) > 2 * threshold else "Moderada"
-                })
-
-        # 6. Summary Results
-        return {
-            "trend": trend.tolist(),
-            "seasonal": seasonal.tolist(),
-            "remainder": remainder.tolist(),
-            "dates": trend.index.strftime("%Y-%m-%d").tolist(),
-            "breakpoints": [trend.index[bk-1].strftime("%Y-%m-%d") for bk in breakpoints_indices if 0 < bk < len(trend)],
-            "segments": segments,
-            "shocks": shocks,
-            "magnitude": float(trend.iloc[-1] - trend.iloc[0]),
-            "is_stable": abs(float(trend.iloc[-1] - trend.iloc[0])) < 0.05
-        }
-    except Exception as e:
-        logger.error(f"BFAST Analysis Failed: {e}")
-        return None
 
 # ==========================================
 # MODULE: REPORT GENERATOR
 # ==========================================
 
-def get_index_status_message(mode: str, stats: Dict, bfast: Dict) -> str:
+_thumb_cache: Dict[str, bytes] = {}
+
+def fetch_thumbnail_bytes(mode: str, start_date: str, end_date: str, geometry: Optional[dict] = None, wetland_name: Optional[str] = None) -> Optional[io.BytesIO]:
+    """Fetch Sentinel-2 PNG thumbnail directly from CDSE Process API.
+    Bypasses localhost HTTP loopback, uses in-memory caching and strict timeout.
     """
-    Set de respuestas automatizadas: Generate diagnostic messages based on 
-    statistical results (Trend, Significance, Moran's I, BFAST).
-    """
-    trend = stats.get('trend', 0)
-    p_val = stats.get('p_value', 1.0)
-    moran = stats.get('moran_i', 0)
-    shocks = bfast.get('shocks', []) if bfast else []
-    mag = bfast.get('magnitude', 0) if bfast else (trend / 100.0 if trend is not None else 0)
-    
-    is_sig = p_val < 0.05
-    is_clustered = moran > 0.3
-    
-    # 1. Base Message by Mode
-    base_msg = ""
-    if mode == "Hydrology":
-        if mag > 0.05: base_msg = "Expansión hídrica detectada." if is_sig else "Ligero aumento de humedad (no significativo)."
-        elif mag < -0.05: base_msg = "Desecación crítica observada." if is_sig else "Tendencia a la reducción de agua (suave)."
-        else: base_msg = "Niveles de agua estables."
-    elif mode == "Vegetation":
-        if mag > 0.05: base_msg = "Incremento vigoroso de biomasa." if is_sig else "Aumento leve de verdor."
-        elif mag < -0.05: base_msg = "Pérdida severa de follaje/estrés." if is_sig else "Ligera disminución de biomasa."
-        else: base_msg = "Vigor vegetal estable."
-    elif mode == "Salinity":
-        if mag > 0.05: base_msg = "Aumento preocupante de sales superficiales." if is_sig else "Tendencia al aumento de salinidad."
-        elif mag < -0.05: base_msg = "Lavado de sales o mejora de sustrato." if is_sig else "Reducción moderada de salinidad."
-        else: base_msg = "Niveles de salinidad estables."
-    else:
-        # Fallback for other indices
-        if abs(mag) > 0.1: base_msg = f"Cambio estructural detectado en {get_index_name(mode)}."
-        else: base_msg = f"Variaciones dentro del rango normal para {get_index_name(mode)}."
-
-    # 2. Append Statistical Nuances
-    reliability = "Alta fiabilidad estadística" if is_sig else "Baja fiabilidad estadística (ruido probable)"
-    spatial = "Cambio espacialmente uniforme o aleatorio"
-    if is_clustered: spatial = "Cambio focalizado en áreas específicas (Clustering detectado)"
-    elif moran < -0.1: spatial = "Cambio disperso y fragmentado"
-
-    full_status = f"{base_msg} {reliability}. {spatial}."
-    
-    # 3. Add Seasonal/Structural Context (BFAST)
-    if bfast:
-        if bfast.get('seasonal') and any(v != 0 for v in bfast['seasonal']):
-            full_status += " Se detectó un patrón estacional rítmico en la serie temporal."
+    if not geometry and wetland_name:
+        geometry = get_wetland_geometry(wetland_name)
         
-        breakpoints = bfast.get('breakpoints', [])
-        if breakpoints:
-            full_status += f" Se identificaron {len(breakpoints)} cambios estructurales (quiebres de tendencia) en {', '.join(breakpoints)}."
+    if not geometry:
+        return None
 
-    if shocks:
-        full_status += f" Se han identificado {len(shocks)} anomalías abruptas (choques) que podrían indicar eventos meteorológicos extremos."
-        
-    return full_status
+    cache_key = f"{wetland_name or 'custom'}_{mode}_{start_date[:10]}_{end_date[:10]}"
+    if cache_key in _thumb_cache:
+        return io.BytesIO(_thumb_cache[cache_key])
 
-def synthesize_wetland_health(analysis_results: Dict) -> Dict:
-    """Detailed cross-analysis of all indices to determine the overall ecosystem health and recommendations."""
-    # Extract trends & stats
-    h = analysis_results.get('Hydrology', {}).get('stats', {})
-    v = analysis_results.get('Vegetation', {}).get('stats', {})
-    wq = analysis_results.get('WaterQuality', {}).get('stats', {})
-    s = analysis_results.get('Salinity', {}).get('stats', {})
-    sv = analysis_results.get('SoilVegetation', {}).get('stats', {})
-    al = analysis_results.get('AlgaeBloom', {}).get('stats', {})
-    wr = analysis_results.get('WaterRatio', {}).get('stats', {})
+    try:
+        token = get_cdse_token()
+    except Exception as e:
+        logger.error(f"Cannot get CDSE token for thumbnail: {e}")
+        return None
 
-    h_t = h.get('trend', 0) or 0
-    v_t = v.get('trend', 0) or 0
-    wq_t = wq.get('trend', 0) or 0
-    s_t = s.get('trend', 0) or 0
-    sv_t = sv.get('trend', 0) or 0
-    al_t = al.get('trend', 0) or 0
-    wr_t = wr.get('trend', 0) or 0
-    
-    # Defaults
-    conclusion = "Estabilidad Ecosistémica"
-    severity = "Baja"
-    details = "El sistema muestra variaciones dentro de los rangos normales de fluctuación estacional. "
-    recs = [
-        "Mantener el protocolo de monitoreo satelital estándar.",
-        "Realizar una inspección visual de control en el próximo trimestre."
-    ]
+    try:
+        import shapely.geometry as sg
+        geom = sg.shape(geometry)
+        bounds = list(geom.bounds)
 
-    # 1. Critical Water Loss & Vegetation Stress
-    if h_t < -15 and v_t < -15:
-        conclusion = "Deterioro Crítico por Desecación"
-        severity = "Alta"
-        details = f"Se observa una reducción simultánea de la lámina de agua ({h_t:.1f}%) y del vigor vegetal ({v_t:.1f}%). "
-        if s_t > 15:
-            details += "Este cuadro se ve agravado por un incremento en la salinidad superficial, indicando procesos de evaporación intensa."
-        recs = [
-            "Activar protocolo de emergencia por estrés hídrico.",
-            "Realizar medición de conductividad eléctrica y pH en puntos críticos.",
-            "Evaluar el estado de los canales de alimentación o fuentes de agua superficial."
-        ]
-    
-    # 2. Eutrophication Risk
-    elif wq_t > 20 and al_t > 15:
-        conclusion = "Riesgo de Eutrofización / Bloom Algal"
-        severity = "Alta"
-        details = f"Incremento significativo de clorofila-a ({wq_t:.1f}%) y algas flotantes ({al_t:.1f}%) con baja renovación hídrica. "
-        recs = [
-            "Tomar muestras de agua para análisis de nitrógeno y fósforo.",
-            "Identificar posibles fuentes de vertido de nutrientes en la cuenca aportante.",
-            "Monitorear niveles de oxígeno disuelto para prevenir anoxia."
-        ]
+        evalscript = get_evalscript(mode, is_process=True)
+        payload = {
+            "input": {
+                "bounds": {
+                    "bbox": bounds,
+                    "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+                },
+                "data": [{
+                    "type": "sentinel-2-l2a",
+                    "dataFilter": {
+                        "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
+                        "maxCloudCoverage": 25
+                    }
+                }]
+            },
+            "output": {
+                "width": 512,
+                "height": 512,
+                "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
+            },
+            "evalscript": evalscript
+        }
 
-    # 3. Salinization dominance
-    elif s_t > 20 and h_t < 0:
-        conclusion = "Estrés por Salinización Superficial"
-        severity = "Media"
-        details = f"Detección de un aumento significativo en la firma de sales ({s_t:.1f}%) coincidente con una disminución de humedad. "
-        recs = [
-            "Validar en terreno la presencia de costras salinas.",
-            "Analizar el impacto en la vegetación halófita local.",
-            "Verificar intrusiones de aguas salobres si aplica a la zona."
-        ]
+        resp = http_session.post(
+            "https://sh.dataspace.copernicus.eu/api/v1/process",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=12
+        )
+        if resp.status_code == 200 and resp.content:
+            _thumb_cache[cache_key] = resp.content
+            return io.BytesIO(resp.content)
+        else:
+            logger.warning(f"CDSE Process API returned status {resp.status_code} for {mode} thumbnail")
+            return None
+    except Exception as e:
+        logger.warning(f"Failed fetching thumbnail for {mode} ({start_date} - {end_date}): {e}")
+        return None
 
-    # 4. Recovery / Expansion
-    elif h_t > 15 and v_t > 15:
-        conclusion = "Fase de Recuperación e Inundación"
-        severity = "Informativa"
-        details = "Aumento de la disponibilidad hídrica propiciando una respuesta biológica positiva y expansión del área inundada."
-        recs = [
-            "Documentar la extensión máxima de la lámina de agua.",
-            "Monitorear la colonización de nuevas áreas por vegetación hidrófila."
-        ]
-
-    # 5. Vegetation Stress without water loss
-    elif v_t < -20 and h_t >= -5:
-        conclusion = "Estrés Vegetativo (Posible Plaga o Quema)"
-        severity = "Media"
-        details = "Pérdida de vigor fotosintético no asociada directamente a la falta de agua superficial."
-        recs = [
-            "Investigar indicios de incendios o quemas de pastizales.",
-            "Revisar presencia de especies invasoras o plagas forestales."
-        ]
-
-    # 6. Specific Water Quality Issue
-    elif wq_t > 30 and al_t <= 5:
-        conclusion = "Alteración de la Turbidez / Calidad de Agua"
-        severity = "Media"
-        details = "Cambios significativos en la coloración o turbidez del agua sin señales de florecimiento algal evidente."
-        recs = [
-            "Evaluar procesos de sedimentación por erosión aguas arriba.",
-            "Revisar entradas de sedimentos tras eventos de lluvia intensos."
-        ]
-
-    # Add Moran's I context if consistent
-    h_moran = h.get('moran_i', 0)
-    if h_moran and h_moran > 0.6:
-        details += " El patrón de cambio muestra una alta consistencia espacial, sugiriendo una tendencia estructural y no aleatoria."
-
-    return {
-        "conclusion": conclusion, 
-        "details": details, 
-        "severity": severity,
-        "recommendations": recs,
-        "trends": {"H": h_t, "V": v_t, "S": s_t}
-    }
-
-def download_image(url: str) -> io.BytesIO:
-    """Download image from URL to BytesIO."""
+def download_image(url: str) -> Optional[io.BytesIO]:
+    """Fallback legacy image downloader with short timeout."""
     if not url: return None
     try:
-        response = requests.get(url, timeout=60)
+        response = requests.get(url, timeout=8)
         response.raise_for_status()
         return io.BytesIO(response.content)
     except Exception as e:
-        logger.error(f"Error downloading image: {e}")
+        logger.warning(f"Error downloading image from URL {url[:60]}: {e}")
         return None
 
 def get_vis_params(mode: str) -> Dict[str, Any]:
@@ -626,24 +449,22 @@ def get_vis_params(mode: str) -> Dict[str, Any]:
     elif mode == "SoilVegetation": return {'min': 0, 'max': 1, 'palette': ['FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901', '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01', '012E01', '011D01', '011301']}
     elif mode == "AlgaeBloom": return {'min': -0.05, 'max': 0.2, 'palette': ['0000FF', '00FFFF', '00FF00', 'FFFF00', 'FF0000', '8B0000']}
     elif mode == "WaterRatio": return {'min': -1, 'max': 1, 'palette': ['FF0000', 'FFA500', 'FFFF00', 'FFFFFF', '00FFFF', '0000FF']}
-    elif mode == "Salinity": return {'min': -1, 'max': 1, 'palette': ['0000FF', 'FFFFFF', '8B4513']} # Salty: Brown/Dry
     return {'min': 0, 'max': 1, 'palette': ['000000', 'FFFFFF']}
 
 def get_index_name(mode: str) -> str:
     """Get the index name for a mode."""
-    names = {'Hydrology': 'MNDWI', 'Vegetation': 'NDRE', 'WaterQuality': 'NDCI', 'SoilVegetation': 'SAVI', 'AlgaeBloom': 'FAI', 'WaterRatio': 'WRI', 'Salinity': 'NDSI'}
+    names = {'Hydrology': 'MNDWI', 'Vegetation': 'NDRE', 'WaterQuality': 'NDCI', 'SoilVegetation': 'SAVI', 'AlgaeBloom': 'FAI', 'WaterRatio': 'WRI'}
     return names.get(mode, mode)
 
 def get_mode_description(mode: str) -> str:
     """Get description for each analysis mode."""
     descs = {
-        'Hydrology': 'El índice MNDWI (Modified Normalized Difference Water Index) se utiliza para realzar cuerpos de agua abiertos y áreas de alta humedad. Valores positivos indican presencia de agua superficial, mientras que valores negativos representan suelo o vegetación seca.',
-        'Vegetation': 'El índice NDRE (Normalized Difference Red Edge) es sensible al contenido de clorofila en la vegetación densa. Es fundamental para monitorear el vigor fotosintético y detectar estrés hídrico temprano en vegetación de humedal.',
-        'WaterQuality': 'El índice NDCI (Normalized Difference Chlorophyll Index) permite estimar la concentración de clorofila-a en cuerpos de agua. Es un indicador clave del estado trófico y la posible presencia de fitoplancton en aguas lénticas.',
-        'SoilVegetation': 'El índice SAVI (Soil Adjusted Vegetation Index) minimiza la influencia del brillo del suelo en el análisis de vegetación. Es ideal para humedales con cobertura vegetal dispersa o estacional.',
-        'AlgaeBloom': 'El índice FAI (Floating Algae Index) detecta vegetación flotante y floraciones algales en la superficie del agua. Es crucial para identificar procesos de eutrofización y blooms de cianobacterias.',
-        'WaterRatio': 'El índice WRI (Water Ratio Index) es un clasificador robusto para la discriminación entre superficies de agua y tierra. Valores > 1 indican una alta probabilidad de superficie acuática pura.',
-        'Salinity': 'El índice NDSI (Normalized Difference Salinity Index) detecta la presencia de sales en la superficie del suelo. Es un indicador vital en zonas áridas o humedales con intrusión salina.'
+        'Hydrology': 'Análisis de humedad y cuerpos de agua superficial mediante índice MNDWI',
+        'Vegetation': 'Análisis de salud vegetativa mediante índice NDRE (clorofila)',
+        'WaterQuality': 'Análisis de calidad de agua y turbidez mediante índice NDCI',
+        'SoilVegetation': 'Análisis de vegetación ajustado por influencia del suelo (SAVI)',
+        'AlgaeBloom': 'Detección de floraciones algales mediante índice FAI',
+        'WaterRatio': 'Ratio agua-tierra mediante índice WRI'
     }
     return descs.get(mode, mode)
 
@@ -690,233 +511,171 @@ def create_temporal_chart(time_series: List[Dict], mode: str) -> io.BytesIO:
     return img_buffer
 
 def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_results: Dict, start_date: str, end_date: str) -> io.BytesIO:
-    """Generate a high-end, professional technical sheet (Ficha Técnica) for wetland monitoring."""
+    """Generate a comprehensive Word report for wetland analysis."""
     doc = Document()
+    header = doc.sections[0].header
+    header.paragraphs[0].text = "WETLAND MONITOR - REPORTE DE ANÁLISIS"
+    header.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    header.paragraphs[0].runs[0].font.size = Pt(10)
+    header.paragraphs[0].runs[0].font.bold = True
+    header.paragraphs[0].runs[0].font.color.rgb = RGBColor(37, 99, 235)
     
-    # Page setup
-    section = doc.sections[0]
-    section.top_margin = Inches(0.5)
-    section.bottom_margin = Inches(0.5)
-    section.left_margin = Inches(0.7)
-    section.right_margin = Inches(0.7)
-
-    # --- HEADER SECTION (3 levels) ---
-    header_table = doc.add_table(rows=3, cols=1)
-    header_table.style = 'Table Grid'
-    header_table.autofit = True
+    title = doc.add_heading(f'Reporte de Análisis: {wetland_name}', level=1)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    c0 = header_table.rows[0].cells[0]
-    c0.paragraphs[0].text = "CUADRO DE FICHAS TECNICAS OFICIAL"
-    c0.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-    c0.paragraphs[0].runs[0].font.bold = True
-    c0.paragraphs[0].runs[0].font.size = Pt(12)
-    c0.paragraphs[0].style.font.color.rgb = RGBColor(0, 0, 0)
-    # Set background color (light grey/greenish as per reference)
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    shading_elm = OxmlElement('w:shd')
-    shading_elm.set(qn('w:fill'), 'D9EAD3') # Light green
-    c0._tc.get_or_add_tcPr().append(shading_elm)
-
-    c1 = header_table.rows[1].cells[0]
-    p1 = c1.paragraphs[0]
-    p1.add_run("PROYECTO: ").bold = True
-    p1.add_run(f"MONITOREO SATELITAL AVANZADO Y DIAGNÓSTICO ECOLÓGICO: {wetland_name.upper()}")
-    p1.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    p1.runs[0].font.size = Pt(9)
-
-    c2 = header_table.rows[2].cells[0]
-    p2 = c2.paragraphs[0]
-    p2.add_run("ENTIDAD: ").bold = True
-    p2.add_run(wetland_metadata.get('entity', 'SISTEMA DE MONITOREO AMBIENTAL GEOINT'))
-    p2.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    p2.runs[0].font.size = Pt(9)
-
+    doc.add_heading('Información del Humedal', level=2)
+    meta_table = doc.add_table(rows=5, cols=2)
+    meta_table.style = 'Light Grid Accent 1'
+    meta_table.rows[0].cells[0].text = 'Nombre'
+    meta_table.rows[0].cells[1].text = wetland_name
+    meta_table.rows[1].cells[0].text = 'Región'
+    meta_table.rows[1].cells[1].text = wetland_metadata.get('region', 'N/A')
+    meta_table.rows[2].cells[0].text = 'Código'
+    meta_table.rows[2].cells[1].text = wetland_metadata.get('code', 'N/A')
+    meta_table.rows[3].cells[0].text = 'Coordenadas'
+    meta_table.rows[3].cells[1].text = wetland_metadata.get('coordinates', 'N/A')
+    meta_table.rows[4].cells[0].text = 'Fecha'
+    meta_table.rows[4].cells[1].text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     doc.add_paragraph()
-
-    # --- METADATA GRID (3 Columns) ---
-    doc.add_heading('DESCRIPCION DE FICHA TECNICA DE MONITOREO', level=3).alignment = WD_ALIGN_PARAGRAPH.CENTER
-    meta_grid = doc.add_table(rows=8, cols=3)
-    meta_grid.style = 'Table Grid'
     
-    def set_cell_text(row, col, label, val):
-        p = meta_grid.rows[row].cells[col].paragraphs[0]
-        p.add_run(f"{label}: ").bold = True
-        p.add_run(str(val))
-        p.runs[0].font.size = Pt(8)
-        if len(p.runs) > 1: p.runs[1].font.size = Pt(8)
-
-    # Labels Row 0, 2, 4, 6 | Values Row 1, 3, 5, 7
-    set_cell_text(0, 0, "PAÍS", "")
-    set_cell_text(1, 0, "", wetland_metadata.get('department', 'CHILE'))
-    set_cell_text(0, 1, "CARACTERISTICAS", "")
-    set_cell_text(1, 1, "", "HUMEDAL PRIORITARIO")
-    set_cell_text(0, 2, "DESIGNACIÓN", "")
-    set_cell_text(1, 2, "", wetland_metadata.get('code', 'W-01'))
-
-    set_cell_text(2, 0, "PROVINCIA", "")
-    set_cell_text(3, 0, "", wetland_metadata.get('province', 'AREA DE ESTUDIO'))
-    set_cell_text(2, 1, "ESTABLECIDA POR", "")
-    set_cell_text(3, 1, "", "WETLAND MONITOR AI")
-    set_cell_text(2, 2, "PERIODO", "")
-    set_cell_text(3, 2, "", f"{start_date} / {end_date}")
-
-    set_cell_text(4, 0, "DISTRITO", "")
-    set_cell_text(5, 0, "", wetland_name)
-    set_cell_text(4, 1, "COORDENADAS CENTROIDE", "")
-    set_cell_text(5, 1, "", wetland_metadata.get('coordinates', 'N/A'))
-    set_cell_text(4, 2, "DATUM", "")
-    set_cell_text(5, 2, "", "WGS-84")
-
-    set_cell_text(6, 0, "UBICACIÓN", "")
-    set_cell_text(7, 0, "", "COORDENADAS GEOGRÁFICAS")
-    set_cell_text(6, 1, "ESTADO GLOBAL", "")
-    set_cell_text(7, 1, "", synthesize_wetland_health(analysis_results)['conclusion'])
-    set_cell_text(6, 2, "PRECISIÓN", "")
-    set_cell_text(7, 2, "", "SENTINEL-2 (10M)")
-
+    doc.add_heading('Período de Análisis', level=2)
+    p = doc.add_paragraph()
+    p.add_run('Desde: ').bold = True
+    p.add_run(start_date)
+    p.add_run(' | ')
+    p.add_run('Hasta: ').bold = True
+    p.add_run(end_date)
     doc.add_paragraph()
-
-    # --- DETAILED ANALYSIS PER INDEX ---
-    doc.add_heading('DESCRIPCION Y ANALISIS DE INDICADORES SATELLITALES', level=3).alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    modes = ['Hydrology', 'Vegetation', 'WaterQuality', 'SoilVegetation', 'AlgaeBloom', 'WaterRatio', 'Salinity']
+    doc.add_heading('Resultados del Análisis', level=2)
+    modes = ['Hydrology', 'Vegetation', 'WaterQuality', 'SoilVegetation', 'AlgaeBloom', 'WaterRatio']
+
+    # Pre-fetch all required thumbnails in parallel (max 6 workers, direct CDSE, zero localhost loopback)
+    geometry = wetland_metadata.get('geometry') or get_wetland_geometry(wetland_name)
+    thumbnails_map: Dict[Tuple[str, str], Optional[io.BytesIO]] = {}
+    
+    if geometry:
+        import concurrent.futures
+        tasks = []
+        try:
+            start_dt = datetime.strptime(start_date[:10], '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date[:10], '%Y-%m-%d')
+            s_end = (start_dt + relativedelta(years=1)).strftime('%Y-%m-%d')
+            e_start = (end_dt - relativedelta(years=1)).strftime('%Y-%m-%d')
+        except Exception:
+            s_end = start_date
+            e_start = end_date
+
+        for m in modes:
+            if m in analysis_results:
+                tasks.append((m, 'start', start_date, s_end))
+                tasks.append((m, 'end', e_start, end_date))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            future_to_task = {
+                executor.submit(fetch_thumbnail_bytes, m, s, e, geometry, wetland_name): (m, kind)
+                for (m, kind, s, e) in tasks
+            }
+            for future in concurrent.futures.as_completed(future_to_task):
+                m, kind = future_to_task[future]
+                try:
+                    img_io = future.result()
+                    if img_io:
+                        thumbnails_map[(m, kind)] = img_io
+                except Exception as ex:
+                    logger.warning(f"Thumbnail prefetch error for {m} {kind}: {ex}")
+    
     for mode in modes:
         if mode not in analysis_results: continue
         res = analysis_results[mode]
         stats = res.get('stats', {})
-        
-        # --- FILTER: Skip indices with no data or zero value ---
-        curr = stats.get('current')
-        if curr is None or curr == 0:
-            logger.info(f"Skipping index {mode} in report: No signal or data (value: {curr})")
-            continue
-            
-        bfast = res.get('bfast', {})
-        
-        # --- ENCAPSULATING BOX (RECUADRO) FOR INDEX ---
-        # Create a single-cell table to act as a container with borders
-        container_table = doc.add_table(rows=1, cols=1)
-        container_table.style = 'Table Grid'
-        container_cell = container_table.rows[0].cells[0]
-        
-        # Everything from here on goes into container_cell
-        container_cell.paragraphs[0].text = f'ÍNDICE: {get_index_name(mode)}'
-        container_cell.paragraphs[0].runs[0].font.bold = True
-        container_cell.paragraphs[0].runs[0].font.size = Pt(11)
-        container_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        # Background for header part of the box
-        from docx.oxml.ns import qn
-        from docx.oxml import OxmlElement
-        shd = OxmlElement('w:shd')
-        shd.set(qn('w:fill'), 'F3F3F3')
-        container_cell._tc.get_or_add_tcPr().append(shd)
-
-        # 1. Description Párrafo
-        p_desc = container_cell.add_paragraph()
-        p_desc.add_run("DESCRIPCION: ").bold = True
-        p_desc.add_run(get_mode_description(mode))
-        p_desc.runs[0].font.size = Pt(8)
-        p_desc.runs[1].font.size = Pt(8)
-
-        # 2. Diagnosis Párrafo
-        status_msg = get_index_status_message(mode, stats, bfast)
-        p_diag = container_cell.add_paragraph()
-        p_diag.add_run("DIAGNOSTICO ESPECIFICO: ").bold = True
-        p_diag.add_run(status_msg)
-        p_diag.runs[0].font.size = Pt(8)
-        p_diag.runs[1].font.size = Pt(8)
-
-        # 3. Stats Row
-        curr = stats.get('current')
-        prev = stats.get('last')
-        trend = stats.get('trend')
-        
-        curr_str = f"{curr:.4f}" if curr is not None else "SIN DATOS"
-        prev_str = f"{prev:.4f}" if prev is not None else "SIN DATOS"
-        trend_str = f"{trend:+.1f}%" if trend is not None else "N/A"
-        
-        p_stats = container_cell.add_paragraph()
-        p_stats.add_run("VALOR ACTUAL: ").bold = True
-        p_stats.add_run(f"{curr_str}  ")
-        p_stats.add_run("VALOR INICIAL: ").bold = True
-        p_stats.add_run(f"{prev_str}  ")
-        p_stats.add_run("VARIACIÓN: ").bold = True
-        run_v = p_stats.add_run(trend_str)
-        if trend and trend > 10: run_v.font.color.rgb = RGBColor(34, 197, 94)
-        if trend and trend < -10: run_v.font.color.rgb = RGBColor(239, 68, 68)
-        for r in p_stats.runs: r.font.size = Pt(8)
-
-        # 4. Maps (if available) - Inner Table for side-by-side
         maps = res.get('maps', {})
-        img_start = download_image(maps.get('start_year', {}).get('thumb_url'))
-        img_end = download_image(maps.get('end_year', {}).get('thumb_url'))
+        
+        doc.add_heading(f'{mode} - {get_index_name(mode)}', level=3)
+        doc.add_paragraph(get_mode_description(mode), style='Intense Quote')
+        
+        st_table = doc.add_table(rows=8, cols=2)
+        st_table.style = 'Light List Accent 1'
+        st_table.rows[0].cells[0].text = 'Valor Actual (Mediana)'
+        st_table.rows[0].cells[1].text = f"{stats.get('current', 0):.4f}"
+        st_table.rows[1].cells[0].text = 'Valor Año Anterior'
+        st_table.rows[1].cells[1].text = f"{stats.get('last', 0):.4f}"
+        
+        trend = stats.get('trend', 0)
+        trend_cell = st_table.rows[2].cells[1]
+        trend_cell.text = f"{trend:+.4f} (Δ Mediana)"
+        st_table.rows[2].cells[0].text = 'Tendencia (Cambio Absoluto)'
+        color = RGBColor(34, 197, 94) if trend > 0 else RGBColor(239, 68, 68)
+        trend_cell.paragraphs[0].runs[0].font.color.rgb = color
 
-        if img_start or img_end:
-            p_map_label = container_cell.add_paragraph()
-            p_map_label.add_run("COMPARATIVA ESPACIAL:").bold = True
-            p_map_label.runs[0].font.size = Pt(8)
+        sen_slope = stats.get('sen_slope', 0.0)
+        sen_cell = st_table.rows[3].cells[1]
+        sen_cell.text = f"{sen_slope:+.4f} / año (Theil-Sen)"
+        st_table.rows[3].cells[0].text = 'Pendiente de Tendencia'
+        
+        st_table.rows[4].cells[0].text = 'Desviación Estándar'
+        st_table.rows[4].cells[1].text = f"{stats.get('current_std', 0):.4f}"
+        st_table.rows[5].cells[0].text = 'Coeficiente de Variación'
+        st_table.rows[5].cells[1].text = f"{stats.get('cv', 0):.2f}%"
+        st_table.rows[6].cells[0].text = 'Puntos de Datos'
+        st_table.rows[6].cells[1].text = str(stats.get('data_count', 0))
+        st_table.rows[7].cells[0].text = 'Valores Atípicos (Estacionales)'
+        st_table.rows[7].cells[1].text = str(stats.get('outlier_count', 0))
+        doc.add_paragraph()
+        
+        doc.add_heading('Mapas del Índice', level=4)
+        
+        img_start = thumbnails_map.get((mode, 'start'))
+        img_end = thumbnails_map.get((mode, 'end'))
+        
+        # Fallback to URL only if pre-fetch did not produce it
+        if not img_start and 'start_year' in maps and 'thumb_url' in maps['start_year']:
+            img_start = download_image(maps['start_year']['thumb_url'])
             
-            p_imgs = container_cell.add_paragraph()
-            p_imgs.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if not img_end and 'end_year' in maps and 'thumb_url' in maps['end_year']:
+            img_end = download_image(maps['end_year']['thumb_url'])
+            
+        if img_start or img_end:
+            map_table = doc.add_table(rows=2, cols=2)
+            map_table.autofit = True
+            map_table.style = 'Table Grid'
+            
+            c_start = map_table.rows[0].cells[0]
+            c_end = map_table.rows[0].cells[1]
+            c_cap_start = map_table.rows[1].cells[0]
+            c_cap_end = map_table.rows[1].cells[1]
+            
+            c_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             if img_start:
-                p_imgs.add_run().add_picture(img_start, width=Inches(2.5))
-                p_imgs.add_run("   ")
+                c_start.paragraphs[0].add_run().add_picture(img_start, width=Inches(2.8))
+                c_cap_start.text = f"Mapa Inicial ({start_date})"
+                c_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+            c_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             if img_end:
-                p_imgs.add_run().add_picture(img_end, width=Inches(2.5))
-
-        # 5. Temporal Chart
+                c_end.paragraphs[0].add_run().add_picture(img_end, width=Inches(2.8))
+                c_cap_end.text = f"Mapa Final ({end_date})"
+                c_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+        legend = create_legend_image(mode)
+        if legend:
+            doc.add_picture(legend, width=Inches(5))
+            doc.add_paragraph("Escala de Valores (Válida para ambos mapas)", style='Caption')
+            
+        doc.add_heading('Evolución Temporal', level=4)
         ts = res.get('time_series', [])
         if ts:
             chart = create_temporal_chart(ts, mode)
-            if chart:
-                p_chart_label = container_cell.add_paragraph()
-                p_chart_label.add_run("COMPORTAMIENTO TEMPORAL:").bold = True
-                p_chart_label.runs[0].font.size = Pt(8)
-                
-                p_chart_img = container_cell.add_paragraph()
-                p_chart_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p_chart_img.add_run().add_picture(chart, width=Inches(5.5))
-
-        # Each index gets exactly one page
+            if chart: doc.add_picture(chart, width=Inches(6))
+            
         doc.add_page_break()
-
-    # --- FINAL AUTOMATED CONCLUSIONS PAGE ---
-    doc.add_heading('CONCLUSIONES TÉCNICAS DEL MONITOREO', level=3).alignment = WD_ALIGN_PARAGRAPH.CENTER
-    health = synthesize_wetland_health(analysis_results)
+        
+    footer = doc.sections[0].footer
+    footer.paragraphs[0].text = f"Generado por WETLAND MONITOR | {datetime.now().strftime('%Y-%m-%d')}"
+    footer.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer.paragraphs[0].runs[0].font.size = Pt(8)
+    footer.paragraphs[0].runs[0].font.color.rgb = RGBColor(128, 128, 128)
     
-    conc_table = doc.add_table(rows=1, cols=1)
-    conc_table.style = 'Table Grid'
-    conc_cell = conc_table.rows[0].cells[0]
-    
-    # Background for conclusion header
-    shd = OxmlElement('w:shd')
-    shd.set(qn('w:fill'), 'E2EFE0')
-    conc_cell._tc.get_or_add_tcPr().append(shd)
-    
-    p_conc = conc_cell.paragraphs[0]
-    p_conc.add_run("DIAGNÓSTICO SINTÉTICO: ").bold = True
-    p_conc.add_run(health['conclusion'].upper())
-    p_conc.runs[1].font.color.rgb = RGBColor(255, 0, 0) if health['severity'] == "Alta" else RGBColor(0, 0, 0)
-    
-    p_det = conc_cell.add_paragraph()
-    p_det.add_run("SÍNTESIS NARRATIVA: ").bold = True
-    p_det.add_run(health['details'])
-    p_det.runs[0].font.size = Pt(10)
-    p_det.runs[1].font.size = Pt(10)
-    
-    p_sev = conc_cell.add_paragraph()
-    p_sev.add_run("NIVEL DE CRITICIDAD: ").bold = True
-    p_sev.add_run(health['severity'])
-    p_sev.runs[1].font.bold = True
-    
-    doc.add_paragraph()
-    p_rec = doc.add_paragraph()
-    p_rec.add_run("RECOMENDACIONES:").bold = True
-    for i, rec in enumerate(health.get('recommendations', []), 1):
-        p_rec.add_run(f"\n{i}. {rec}")
-    
-    # Save
     doc_buffer = io.BytesIO()
     doc.save(doc_buffer)
     doc_buffer.seek(0)
@@ -935,28 +694,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# GEE Initialization (Attempt global init, but handle failure gracefully)
-try:
-    # Try global init without project first (for backward compatibility/local auth)
-    ee.Initialize()
-    logger.info("Google Earth Engine Initialized globally")
-except Exception:
-    logger.warning("Global GEE init failed. Will attempt per-request initialization.")
+from dotenv import load_dotenv
+_env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_env_path)
+load_dotenv()
 
-def ensure_ee_initialized(project_id: str = None):
-    """Ensure EE is initialized with a project ID."""
-    try:
-        # Check if already initialized
-        ee.Projection('EPSG:4326') 
-    except Exception:
-        # Not initialized or needs project
-        try:
-            p = project_id or os.getenv("GEE_PROJECT_ID", "ee-wetlandmonitor")
-            ee.Initialize(project=p)
-            logger.info(f"GEE Initialized with project: {p}")
-        except Exception as e:
-            logger.error(f"Failed to initialize GEE: {e}")
-            raise ValidationError(f"Earth Engine initialization failed: {e}")
+# Support both password grant (email+password) and client_credentials
+CDSE_USERNAME = os.getenv("CDSE_USERNAME", "")
+CDSE_PASSWORD = os.getenv("CDSE_PASSWORD", "")
+CDSE_CLIENT_ID = os.getenv("CDSE_CLIENT_ID", "")
+CDSE_CLIENT_SECRET = os.getenv("CDSE_CLIENT_SECRET", "")
+
+if not (CDSE_USERNAME and CDSE_PASSWORD) and not (CDSE_CLIENT_ID and CDSE_CLIENT_SECRET):
+    logger.warning("CDSE credentials not found in env. Configure via UI or .env file.")
+
+# Robust HTTP session with connection pooling and retries
+http_session = requests.Session()
+retries = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    raise_on_status=False
+)
+http_session.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20))
+
+# Thread-safe token caching
+_cdse_token_cache = {
+    "token": None,
+    "expires_at": 0.0
+}
+_cdse_token_lock = threading.Lock()
+
+def invalidate_cdse_token():
+    """Invalidate token cache (e.g., when credentials are updated)."""
+    with _cdse_token_lock:
+        _cdse_token_cache["token"] = None
+        _cdse_token_cache["expires_at"] = 0.0
+
+def get_cdse_token() -> str:
+    """Retrieve OAuth token for Copernicus Data Space Ecosystem with thread-safe caching.
+    Supports two grant types:
+    1. password grant: email + password (standard user account at dataspace.copernicus.eu)
+    2. client_credentials: OAuth client_id + client_secret (service account)
+    """
+    global _cdse_token_cache
+    now = time.time()
+    
+    with _cdse_token_lock:
+        # Re-use cached token if still valid with a 60s safety buffer
+        if _cdse_token_cache["token"] and now < (_cdse_token_cache["expires_at"] - 60):
+            return _cdse_token_cache["token"]
+
+        token_url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+        
+        if CDSE_USERNAME and CDSE_PASSWORD:
+            from oauthlib.oauth2 import LegacyApplicationClient
+            from requests_oauthlib import OAuth2Session
+            client = LegacyApplicationClient(client_id="cdse-public")
+            oauth = OAuth2Session(client=client)
+            token_resp = oauth.fetch_token(token_url=token_url, username=CDSE_USERNAME, password=CDSE_PASSWORD)
+            token = token_resp['access_token']
+            expires_in = token_resp.get('expires_in', 600)
+            _cdse_token_cache["token"] = token
+            _cdse_token_cache["expires_at"] = now + float(expires_in)
+            return token
+            
+        elif CDSE_CLIENT_ID and CDSE_CLIENT_SECRET:
+            from oauthlib.oauth2 import BackendApplicationClient
+            from requests_oauthlib import OAuth2Session
+            client = BackendApplicationClient(client_id=CDSE_CLIENT_ID)
+            oauth = OAuth2Session(client=client)
+            token_resp = oauth.fetch_token(token_url=token_url, client_id=CDSE_CLIENT_ID, client_secret=CDSE_CLIENT_SECRET)
+            token = token_resp['access_token']
+            expires_in = token_resp.get('expires_in', 600)
+            _cdse_token_cache["token"] = token
+            _cdse_token_cache["expires_at"] = now + float(expires_in)
+            return token
+            
+        else:
+            raise RuntimeError("No CDSE credentials configured. Use the Credentials panel in the app or .env file.")
 
 class AnalysisRequest(BaseModel):
     geojson: Dict[str, Any]
@@ -964,6 +780,7 @@ class AnalysisRequest(BaseModel):
     endDate: str
     projectId: str = None
     mode: str = "Hydrology"
+    wetlandName: str = None
 
 def normalize_index_value(value, mode):
     """Normalize index values for consistent charting."""
@@ -975,8 +792,7 @@ def normalize_index_value(value, mode):
         'WaterQuality': (-0.1, 0.5), # NDCI
         'SoilVegetation': (0, 1),  # SAVI
         'AlgaeBloom': (-0.05, 0.2), # FAI
-        'WaterRatio': (-1, 1),      # WRI
-        'Salinity': (-1, 1)         # NDSI
+        'WaterRatio': (-1, 1)      # WRI
     }
     
     if mode == 'WaterRatio':
@@ -990,165 +806,266 @@ def normalize_index_value(value, mode):
     min_v, max_v = ranges.get(mode, (-1, 1))
     return max(min_v, min(max_v, value))
 
-def get_sentinel_data(aoi, start_date, end_date, mode):
-    """Get and process Sentinel-2 data with scaling and cloud masking."""
-    
-    def mask_clouds(img):
-        cloud_bit_mask = 1 << 10
-        cirrus_bit_mask = 1 << 11
-        qa = img.select('QA60')
-        # SCL (Scene Classification Layer) for more robust masking if available
-        # 3: Cloud Shadows, 8: Cloud Medium Prob, 9: Cloud High Prob, 10: Cirrus
-        mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(
-               qa.bitwiseAnd(cirrus_bit_mask).eq(0))
-        
-        # Scale bands from 0-10000 to 0-1 (IMPORTANT for SAVI/FAI/NDCI)
-        return img.updateMask(mask).divide(10000).copyProperties(img, ['system:time_start'])
+def hex_to_rgb01(hex_str: str) -> List[float]:
+    """Convert hex color string to normalized RGB float array [0, 1]."""
+    hex_str = hex_str.lstrip('#')
+    return [
+        round(int(hex_str[0:2], 16) / 255.0, 4),
+        round(int(hex_str[2:4], 16) / 255.0, 4),
+        round(int(hex_str[4:6], 16) / 255.0, 4)
+    ]
 
-    s2_col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-              .filterBounds(aoi)
-              .filterDate(start_date, end_date)
-              .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
-              .map(mask_clouds))
-
-    if mode == "Hydrology":
-        # MNDWI (B3 Green, B11 SWIR)
-        def add_mndwi(img):
-            mndwi = img.normalizedDifference(['B3', 'B11']).rename('Value')
-            return img.addBands(mndwi).select('Value').copyProperties(img, ['system:time_start'])
-        return s2_col.map(add_mndwi)
-
-    elif mode == "Vegetation":
-        # NDRE (B8 NIR, B5 RedEdge)
-        def add_ndre(img):
-            ndre = img.normalizedDifference(['B8', 'B5']).rename('Value')
-            return img.addBands(ndre).select('Value').copyProperties(img, ['system:time_start'])
-        return s2_col.map(add_ndre)
-
-    elif mode == "WaterQuality":
-        # NDCI (B5 RedEdge, B4 Red)
-        def calc_ndci(img):
-            ndci = img.normalizedDifference(['B5', 'B4']).rename('Value')
-            return img.addBands(ndci).select('Value').copyProperties(img, ['system:time_start'])
-        return s2_col.map(calc_ndci)
-
-    elif mode == "SoilVegetation":
-        # SAVI ((B8 - B4) / (B8 + B4 + 0.5)) * 1.5
-        def calc_savi(img):
-            savi = img.expression(
-                '((NIR - RED) / (NIR + RED + 0.5)) * 1.5',
-                {'NIR': img.select('B8'), 'RED': img.select('B4')}
-            ).rename('Value')
-            return img.addBands(savi).select('Value').copyProperties(img, ['system:time_start'])
-        return s2_col.map(calc_savi)
-        
-    elif mode == "AlgaeBloom":
-        # FAI (B8 - (B4 + (B11-B4) * (832.8-664.6)/(1613.7-664.6)))
-        def calc_fai(img):
-            fai = img.expression(
-                'NIR - (RED + (SWIR - RED) * 0.177)',
-                {'NIR': img.select('B8'), 'RED': img.select('B4'), 'SWIR': img.select('B11')}
-            ).rename('Value')
-            return img.addBands(fai).select('Value').copyProperties(img, ['system:time_start'])
-        return s2_col.map(calc_fai)
-    
-    elif mode == "WaterRatio":
-        # WRI (Green + Red) / (NIR + SWIR) -> (B3 + B4) / (B8 + B11)
-        def calc_wri(img):
-            wri = img.expression(
-                '(GREEN + RED) / (NIR + SWIR)',
-                {'GREEN': img.select('B3'), 'RED': img.select('B4'), 'NIR': img.select('B8'), 'SWIR': img.select('B11')}
-            ).rename('Value')
-            return img.addBands(wri).select('Value').copyProperties(img, ['system:time_start'])
-        return s2_col.map(calc_wri)
-        
-    elif mode == "Salinity":
-        # NDSI (SWIR1 - NIR) / (SWIR1 + NIR) -> (B11 - B8) / (B11 + B8)
-        def calc_ndsi(img):
-            ndsi = img.normalizedDifference(['B11', 'B8']).rename('Value')
-            return img.addBands(ndsi).select('Value').copyProperties(img, ['system:time_start'])
-        return s2_col.map(calc_ndsi)
-
-    return ee.ImageCollection([])
-
-def analyze_period(aoi, start_date, end_date, mode):
-    """Analyze a specific period for time series data."""
-    col = get_sentinel_data(aoi, start_date, end_date, mode)
-    
-    def reduce_img(img):
-        date = img.date().format("YYYY-MM-dd")
-        mean_val = img.reduceRegion(
-            reducer=ee.Reducer.median(), # Median is robust to outliers
-            geometry=aoi,
-            scale=10, # Reverted to native 10m resolution for maximum detail
-            maxPixels=1e9
-        ).get('Value')
-        return ee.Feature(None, {'date': date, 'value': mean_val})
-        
-    features = col.map(reduce_img).filter(ee.Filter.notNull(['value'])).getInfo()['features']
-    return [{'date': f['properties']['date'], 'value': f['properties']['value']} for f in features]
-
-def generate_map_url(aoi, start, end, mode):
-    """Generate map tile URLs for RGB and metric visualization."""
-    col = get_sentinel_data(aoi, start, end, mode)
-    latest = col.median().clip(aoi)
-    
-    # RGB visualization logic
-    if mode == "Hydrology":
-        s2_col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-                  .filterBounds(aoi).filterDate(start, end)
-                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)))
-        s2_rgb = s2_col.median().clip(aoi).divide(10000)
-        rgb_vis = {'min': 0, 'max': 0.3, 'bands': ['B4', 'B3', 'B2']}
-        rgb_map = s2_rgb.getMapId(rgb_vis)
-    else:
-        rgb_vis = {'min': 0, 'max': 0.3, 'bands': ['B4', 'B3', 'B2']}
-        # Fallback to S2 collection for RGB if 'latest' only has Value band
-        s2_col_rgb = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-                  .filterBounds(aoi).filterDate(start, end)
-                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)))
-        rgb_map = s2_col_rgb.median().clip(aoi).divide(10000).getMapId(rgb_vis)
-    
-    metric_vis = get_vis_params(mode)
-    metric_map = latest.select('Value').getMapId(metric_vis)
-    
-    # Generate thumbnail URL for report
-    thumb_params = metric_vis.copy()
-    thumb_params['dimensions'] = 350
-    thumb_params['region'] = aoi
-    thumb_params['format'] = 'png'
-    try:
-        thumb_url = latest.select('Value').getThumbURL(thumb_params)
-    except Exception:
-        thumb_url = None
-
-    return {
-        "rgb": rgb_map['tile_fetcher'].url_format,
-        "metric": metric_map['tile_fetcher'].url_format,
-        "thumb_url": thumb_url
+def get_evalscript(mode: str, is_process: bool = True) -> str:
+    """Generate Sentinel-2 Evalscript for CDSE Process API (visual map tiles) or Statistical API (timeseries data).
+    Scientifically audited and calibrated:
+    1. FAI (Floating Algae Index) calibrated to Sentinel-2 MSI exact central wavelengths:
+       Factor = (842 - 665) / (1610 - 665) = 177 / 945 = 0.1873 (Hu, 2009).
+    2. Pixel-level quality filtering using Sen2Cor Scene Classification Layer (SCL):
+       Excludes cloud shadows (3), clouds (8, 9), thin cirrus (10) and snow/ice (11).
+    """
+    bands_map = {
+        'Hydrology': ('"B03", "B11"', 'let val = index(sample.B03, sample.B11);'),
+        'Vegetation': ('"B08", "B05"', 'let val = index(sample.B08, sample.B05);'),
+        'WaterQuality': ('"B04", "B05"', 'let val = index(sample.B05, sample.B04);'),
+        'SoilVegetation': ('"B04", "B08"', 'let val = ((sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 0.5)) * 1.5;'),
+        'AlgaeBloom': ('"B04", "B08", "B11"', 'let val = sample.B08 - (sample.B04 + (sample.B11 - sample.B04) * 0.1873);'),
+        'WaterRatio': ('"B03", "B04", "B08", "B11"', 'let val = (sample.B03 + sample.B04) / (sample.B08 + sample.B11);')
     }
 
-def perform_single_analysis(request, mode):
+    if is_process:
+        if mode == "RGB":
+            return """//VERSION=3
+function setup() {
+  return { input: ["B04", "B03", "B02", "dataMask"], output: { bands: 4 } };
+}
+function evaluatePixel(sample) {
+  if (sample.dataMask === 0) return [0, 0, 0, 0];
+  return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02, 1.0];
+}"""
+
+        # Process API (Visual map tiles / PNG) using ColorRampVisualizer with SCL Quality Masking
+        vis_params = get_vis_params(mode)
+        palette = vis_params.get('palette', ['000000', 'FFFFFF'])
+        min_v = vis_params.get('min', -1.0)
+        max_v = vis_params.get('max', 1.0)
+
+        ramp_items = []
+        n_colors = len(palette)
+        for i, hex_code in enumerate(palette):
+            val = min_v + i * (max_v - min_v) / (n_colors - 1)
+            rgb = hex_to_rgb01(hex_code)
+            ramp_items.append(f"[{val:.4f}, [{rgb[0]}, {rgb[1]}, {rgb[2]}]]")
+        ramp_js = "[\n  " + ",\n  ".join(ramp_items) + "\n]"
+
+        in_bands, expr = bands_map.get(mode, ('"B04", "B08"', 'let val = index(sample.B08, sample.B04);'))
+
+        return f"""//VERSION=3
+const ramp = {ramp_js};
+const visualizer = new ColorRampVisualizer(ramp);
+
+function setup() {{
+  return {{
+    input: [{in_bands}, "SCL", "dataMask"],
+    output: {{ bands: 4 }}
+  }};
+}}
+
+function evaluatePixel(sample) {{
+  // 1. Mask no-data boundary
+  if (sample.dataMask === 0) return [0, 0, 0, 0];
+  // 2. SCL Quality Filter: mask cloud shadows (3), clouds (8, 9), thin cirrus (10) and snow/ice (11)
+  if (sample.SCL === 3 || sample.SCL === 8 || sample.SCL === 9 || sample.SCL === 10 || sample.SCL === 11) {{
+    return [0, 0, 0, 0];
+  }}
+  {expr}
+  if (isNaN(val)) return [0, 0, 0, 0];
+  let rgb = visualizer.process(val);
+  return [rgb[0], rgb[1], rgb[2], 0.85];
+}}"""
+
+    else:
+        # Statistical API (aggregations, counts, stats in FLOAT32) with SCL Quality Masking
+        in_bands, expr = bands_map.get(mode, ('"B04", "B08"', 'let val = index(sample.B08, sample.B04);'))
+        return f"""//VERSION=3
+function setup() {{
+  return {{
+    input: [{in_bands}, "SCL", "dataMask"],
+    output: [
+      {{ id: "default", bands: 1, sampleType: "FLOAT32" }},
+      {{ id: "dataMask", bands: 1, sampleType: "UINT8" }}
+    ]
+  }};
+}}
+function evaluatePixel(sample) {{
+  // Exclude no-data, cloud shadows (3), clouds (8, 9), cirrus (10) and snow (11)
+  if (sample.dataMask === 0 || sample.SCL === 3 || sample.SCL === 8 || sample.SCL === 9 || sample.SCL === 10 || sample.SCL === 11) {{
+    return {{ default: [NaN], dataMask: [0] }};
+  }}
+  {expr}
+  if (isNaN(val)) {{
+    return {{ default: [NaN], dataMask: [0] }};
+  }}
+  return {{ default: [val], dataMask: [1] }};
+}}"""
+
+def analyze_period(aoi, start_date, end_date, mode):
+    """Analyze a specific period for time series data using CDSE API with grid splitting for high resolution."""
+    token = get_cdse_token()
+    url = "https://sh.dataspace.copernicus.eu/api/v1/statistics"
+    evalscript = get_evalscript(mode, is_process=False)
+
+    import shapely.geometry as sg
+    import concurrent.futures
+
+    try:
+        geom = sg.shape(aoi)
+    except Exception:
+        return []
+
+    minx, miny, maxx, maxy = geom.bounds
+    lon_span = abs(maxx - minx)
+    lat_span = abs(maxy - miny)
+
+    # Max chunk size: 0.1 degrees (~11km). 
+    max_chunk_deg = 0.1
+    # Safeguard for extremely large areas (e.g., > 100km scale) to prevent generating too many chunks
+    if lon_span > 1.0 or lat_span > 1.0:
+        max_chunk_deg = max(lon_span, lat_span) / 10.0
+
+    # Base resolution is 10m (~0.00009 deg). 
+    # If the chunk is artificially scaled up to prevent excessive chunks, we ensure 
+    # the resolution stays within the CDSE 1500px/chunk constraint.
+    deg_res = max(0.00009, max_chunk_deg / 1500.0)
+
+    chunks = []
+    x = minx
+    while x < maxx:
+        y = miny
+        while y < maxy:
+            box = sg.box(x, y, x + max_chunk_deg, y + max_chunk_deg)
+            intersection = geom.intersection(box)
+            if not intersection.is_empty:
+                if intersection.geom_type == 'Polygon':
+                    chunks.append(intersection)
+                elif intersection.geom_type == 'MultiPolygon':
+                    # Add individual polygons to chunks
+                    for poly in intersection.geoms:
+                        chunks.append(poly)
+            y += max_chunk_deg
+        x += max_chunk_deg
+
+    if not chunks:
+        chunks = [geom]
+
+    def fetch_chunk(chunk_geom):
+        payload = {
+            "input": {
+                "bounds": {
+                    "geometry": chunk_geom.__geo_interface__,
+                    "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+                },
+                "data": [{
+                    "type": "sentinel-2-l2a",
+                    "dataFilter": {
+                        "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
+                        "maxCloudCoverage": 20
+                    }
+                }]
+            },
+            "aggregation": {
+                "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
+                "aggregationInterval": {"of": "P1D"},
+                "evalscript": evalscript,
+                "resx": deg_res,
+                "resy": deg_res
+            }
+        }
+        
+        try:
+            resp = http_session.post(
+                url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=45
+            )
+            if resp.status_code != 200:
+                logger.error(f"CDSE API Error on chunk: {resp.text[:300]}")
+                return []
+            
+            chunk_ts = []
+            data = resp.json()
+            for interval in data.get('data', []):
+                date_str = interval.get('interval', {}).get('from', '')[:10]
+                outputs = interval.get('outputs', {})
+                if outputs and 'default' in outputs:
+                    band_stats = outputs['default']
+                    val_raw = band_stats.get('bands', {}).get('B0', {}).get('stats', {}).get('mean')
+                    try:
+                        val = float(val_raw) if val_raw is not None else None
+                        if val is not None and math.isnan(val):
+                            val = None
+                    except (ValueError, TypeError):
+                        val = None
+                    
+                    metrics = band_stats.get('bands', {}).get('B0', {}).get('stats', {})
+                    count = metrics.get('sampleCount', 0)
+                    if val is not None and count > 0:
+                        chunk_ts.append({'date': date_str, 'value': val, 'weight': count})
+            return chunk_ts
+        except Exception as ex:
+            logger.error(f"Network error on chunk: {ex}")
+            return []
+
+    all_series = []
+    # Use max 5 workers to parallelize without triggering rate limits excessively
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(fetch_chunk, ch) for ch in chunks]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                res = future.result()
+                if res:
+                    all_series.extend(res)
+            except Exception as e:
+                logger.error(f"Error fetching chunk: {e}")
+
+    # Aggregate back by date (weighted average of medians based on valid pixels)
+    aggregated = {}
+    for pt in all_series:
+        d = pt['date']
+        if d not in aggregated:
+            aggregated[d] = {'sum_val': 0, 'sum_wt': 0}
+        aggregated[d]['sum_val'] += pt['value'] * pt['weight']
+        aggregated[d]['sum_wt'] += pt['weight']
+        
+    final_series = []
+    for d, acc in aggregated.items():
+        if acc['sum_wt'] > 0:
+            final_series.append({'date': d, 'value': acc['sum_val'] / acc['sum_wt']})
+            
+    final_series.sort(key=lambda x: x['date'])
+    return final_series
+
+def generate_map_url(aoi, start, end, mode, wetland_name=None):
+    """Generate absolute URL map tile paths for RGB and metric visualization."""
+    BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+    suffix = f"?wetland={wetland_name}" if wetland_name else ""
+    return {
+        "rgb": f"{BASE_URL}/api/tiles/rgb/{start}/{end}/{{z}}/{{x}}/{{y}}{suffix}",
+        "metric": f"{BASE_URL}/api/tiles/metric/{mode}/{start}/{end}/{{z}}/{{x}}/{{y}}{suffix}",
+        "thumb_url": f"{BASE_URL}/api/thumb/{mode}/{start}/{end}{suffix}"
+    }
+
+def perform_single_analysis(request: AnalysisRequest, mode):
     """Perform robust analysis for a single mode."""
     try:
-        ensure_ee_initialized(request.projectId)
         logger.info(log_process_stage('', mode, 'processing'))
         start_obj, end_obj = validate_date_range(request.startDate, request.endDate)
         aoi = validate_geometry(request.geojson)
+        wetland_name = request.wetlandName
         
-        # Auto-expand temporal window if insufficient data (Option 1)
         current_data = analyze_period(aoi, request.startDate, request.endDate, mode)
-        expansions = 0
-        current_start_obj = start_obj
-
-        while (not current_data or len([d for d in current_data if d.get('value') is not None]) < 1) and expansions < 4:
-            expansions += 1
-            current_start_obj = current_start_obj - relativedelta(months=3)
-            logger.info(f"[{mode}] Insufficient data. Expanding temporal window backwards to {current_start_obj.strftime('%Y-%m-%d')}")
-            current_data = analyze_period(aoi, current_start_obj.strftime("%Y-%m-%d"), request.endDate, mode)
-
-        if not current_data or len([d for d in current_data if d.get('value') is not None]) < 1:
-            logger.warning(f"Still insufficient data for {mode} after expanding 1 year backwards. Using whatever is available.")
+        if not current_data or len(current_data) < 3:
+            raise ValidationError(f"Insufficient data for {mode}")
             
         coverage = validate_temporal_coverage(current_data)
         if not coverage['valid']:
@@ -1158,43 +1075,16 @@ def perform_single_analysis(request, mode):
         current_data_flagged = detect_outliers(current_data)
         outlier_count = sum(1 for d in current_data_flagged if d.get('is_outlier'))
         
-        # Baseline logic: If range > 2 years, compare against the beginning of the period (Historical Baseline)
-        total_range_days = (end_obj - start_obj).days
-        if total_range_days > 730:
-            last_start = request.startDate
-            last_end = (start_obj + relativedelta(years=1)).strftime("%Y-%m-%d")
-            logger.info(f"[{mode}] Using Historical Baseline for statistics (Long range: {total_range_days} days)")
-            
-            last_data = analyze_period(aoi, last_start, last_end, mode)
-            # Auto-expansion Forward for Historical Baseline if data is missing (e.g. 2016 clouds)
-            b_exp = 0
-            while (not last_data or len([d for d in last_data if d.get('value') is not None]) < 1) and b_exp < 4:
-                b_exp += 1
-                last_end_obj = datetime.strptime(last_end, "%Y-%m-%d") + relativedelta(months=3)
-                last_end = last_end_obj.strftime("%Y-%m-%d")
-                logger.info(f"[{mode}] Insufficient baseline data. Expanding baseline window forward to {last_end}")
-                last_data = analyze_period(aoi, last_start, last_end, mode)
-        else:
-            last_start = (current_start_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
-            last_end = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
-            last_data = analyze_period(aoi, last_start, last_end, mode)
-            
-            # Expansion for Standard Baseline
-            b_exp = 0
-            while (not last_data or len([d for d in last_data if d.get('value') is not None]) < 1) and b_exp < 4:
-                b_exp += 1
-                last_start_obj = datetime.strptime(last_start, "%Y-%m-%d") - relativedelta(months=3)
-                last_start = last_start_obj.strftime("%Y-%m-%d")
-                logger.info(f"[{mode}] Insufficient standard baseline data. Expanding backwards to {last_start}")
-                last_data = analyze_period(aoi, last_start, last_end, mode)
-
+        last_start = (start_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
+        last_end = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
+        last_data = analyze_period(aoi, last_start, last_end, mode)
         trend_stats = calculate_trend_statistics(current_data_flagged, last_data) or {}
         
         # Start/End Year Maps
         start_year_end = (start_obj + relativedelta(years=1)).strftime("%Y-%m-%d")
-        maps_start = generate_map_url(aoi, request.startDate, start_year_end, mode)
+        maps_start = generate_map_url(aoi, request.startDate, start_year_end, mode, wetland_name)
         end_year_start = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
-        maps_end = generate_map_url(aoi, end_year_start, request.endDate, mode)
+        maps_end = generate_map_url(aoi, end_year_start, request.endDate, mode, wetland_name)
         
         maps = {
             "rgb": maps_end["rgb"],
@@ -1203,52 +1093,42 @@ def perform_single_analysis(request, mode):
             "end_year": maps_end
         }
         
+        def safe_float(v, fallback=0):
+            if v is None: return fallback
+            try:
+                f = float(v)
+                if math.isnan(f) or math.isinf(f): return fallback
+                return f
+            except: return fallback
+        
         result = {
             "mode": mode,
             "stats": {
-                "current": current_stats['median'],
-                "current_mean": current_stats['mean'],
-                "current_std": current_stats['std'],
-                "last": trend_stats.get('previous_median', 0),
-                "trend": trend_stats.get('trend_percent', 0),
-                "p_value": trend_stats.get('p_value', 1.0),
-                "is_significant": trend_stats.get('is_significant', False),
-                "moran_i": calculate_spatial_consistency(get_sentinel_data(aoi, end_year_start, request.endDate, mode).median().clip(aoi), aoi),
+                "current": safe_float(current_stats['median']),
+                "current_mean": safe_float(current_stats['mean']),
+                "current_std": safe_float(current_stats['std']),
+                "last": safe_float(trend_stats.get('previous_median', 0)),
+                "trend": safe_float(trend_stats.get('trend', 0)),
+                "trend_delta": safe_float(trend_stats.get('absolute_change', 0)),
+                "sen_slope": safe_float(trend_stats.get('sen_slope_per_year', 0)),
                 "outlier_count": outlier_count,
                 "data_count": current_stats['count'],
-                "cv": current_stats['cv'],
-                "baseline_period": f"{last_start} a {last_end}"
+                "cv": safe_float(current_stats['cv'])
             },
             "time_series": current_data_flagged,
             "maps": maps,
-            "coverage": coverage,
-            "bfast": apply_bfast_analysis(current_data_flagged, mode)
+            "coverage": coverage
         }
         
         # Normalize time series for display
         normalized_series = []
         for point in current_data_flagged:
             p = point.copy()
-            p['value_raw'] = point['value']
-            p['value'] = normalize_index_value(point['value'], mode)
+            p['value_raw'] = safe_float(point['value'], None)
+            p['value'] = safe_float(normalize_index_value(point['value'], mode), None)
             normalized_series.append(p)
         result['time_series'] = normalized_series
         
-        # Internal Auditing for Validation
-        try:
-            audit_entry = {
-                "timestamp": datetime.now().isoformat(),
-                "mode": mode,
-                "project": request.projectId,
-                "median_value": current_stats['median'],
-                "data_points": current_stats['count'],
-                "sample_points": current_data_flagged[:3]
-            }
-            with open("audit_indices.json", "a") as af:
-                af.write(json.dumps(audit_entry) + "\n")
-        except Exception as ae:
-            logger.error(f"Audit log failed: {ae}")
-
         logger.info(log_process_stage('', mode, 'completed'))
         return result
         
@@ -1256,48 +1136,10 @@ def perform_single_analysis(request, mode):
         logger.error(f"{mode} error: {e}")
         return create_error_response(e, mode)
 
-@app.get("/debug/indices")
-async def debug_indices():
-    """Internal diagnostic endpoint to verify real GEE calculations."""
-    try:
-        # Internal test configuration
-        ensure_ee_initialized(None)
-        
-        aoi = ee.Geometry.Point([-73.0928, -41.6793]).buffer(500).bounds()
-        start = "2024-01-01"
-        end = "2024-03-12"
-        class MockRequest:
-            def __init__(self, geojson, startDate, endDate, projectId):
-                self.geojson = geojson
-                self.startDate = startDate
-                self.endDate = endDate
-                self.projectId = projectId
-                self.mode = "Hydrology"
-
-        request = MockRequest(aoi.getInfo(), start, end, project_id)
-        result = perform_single_analysis(request, "Hydrology")
-        
-        return {
-            "status": "success",
-            "project": project_id,
-            "mode": mode,
-            "analysis_result": result
-        }
-    except Exception as e:
-        logger.error(f"Debug endpoint failed: {e}")
-        return {"status": "error", "message": str(e)}
-
 @app.post("/analyze")
 async def analyze(request: AnalysisRequest, authorization: str = Header(None)):
-    if not authorization: raise HTTPException(401, "Missing Token")
-    token = authorization.split(" ")[1]
-    
+    # Auth validation removed as CDSE will use service credentials
     try:
-        from google.oauth2.credentials import Credentials
-        creds = Credentials(token)
-        if request.projectId: ee.Initialize(creds, project=request.projectId)
-        else: ee.Initialize(creds)
-        
         res = perform_single_analysis(request, request.mode)
         if not res or 'error' in res: 
             raise HTTPException(500, str(res.get('error', 'Unknown Error')))
@@ -1329,34 +1171,13 @@ async def analyze(request: AnalysisRequest, authorization: str = Header(None)):
 
 @app.post("/analyze-all")
 async def analyze_all(request: AnalysisRequest, authorization: str = Header(None)):
-    if not authorization: raise HTTPException(401, "Missing Token")
-    
     try:
-        token = authorization.split(" ")[1]
-        from google.oauth2.credentials import Credentials
-        creds = Credentials(token)
-        
-        if request.projectId: 
-            ee.Initialize(creds, project=request.projectId)
-        else: 
-            ee.Initialize(creds)
-        
         results = {}
-        modes = ["Hydrology", "Vegetation", "WaterQuality", "SoilVegetation", "AlgaeBloom", "WaterRatio", "Salinity"]
+        modes = ["Hydrology", "Vegetation", "WaterQuality", "SoilVegetation", "AlgaeBloom", "WaterRatio"]
         
-        # Parallel Execution of Analysis Modes
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(modes)) as executor:
-            # Map modes to futures
-            future_to_mode = {executor.submit(perform_single_analysis, request, m): m for m in modes}
-            
-            for future in concurrent.futures.as_completed(future_to_mode):
-                m = future_to_mode[future]
-                try:
-                    results[m] = future.result()
-                    logger.info(f"Parallel Task {m}: Success")
-                except Exception as exc:
-                    logger.error(f"Parallel Task {m} generated an exception: {exc}")
-                    results[m] = create_error_response(exc, m)
+        for m in modes:
+            logger.info(log_process_stage('', m, 'processing'))
+            results[m] = perform_single_analysis(request, m)
             
         logger.info(log_process_stage('', None, 'final'))
         return {"status": "success", "data": results}
@@ -1364,139 +1185,302 @@ async def analyze_all(request: AnalysisRequest, authorization: str = Header(None
         logger.error(f"Analyze-all Error: {e}")
         raise HTTPException(500, detail=f"Backend Error: {str(e)}")
 
-@app.post("/process-spatial-file")
-async def process_spatial_file(file: UploadFile = File(...)):
-    """Process uploaded KML, KMZ, or SHP (zipped) files and return GeoJSON."""
-    temp_dir = tempfile.mkdtemp()
+# TILE PROXY
+from fastapi.responses import Response
+def xyz_to_bbox(x, y, z):
+    n = 2.0 ** z
+    lon_left = x / n * 360.0 - 180.0
+    lat_top = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
+    lon_right = (x + 1) / n * 360.0 - 180.0
+    lat_bottom = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
+    return [lon_left, lat_bottom, lon_right, lat_top]
+
+@app.get("/api/tiles/rgb/{start_date}/{end_date}/{z}/{x}/{y}")
+async def get_rgb_tile(start_date: str, end_date: str, z: int, x: int, y: int, wetland: str = None):
+    """Serve an RGB Sentinel-2 tile for the given date range and tile coordinates."""
+    token = get_cdse_token()
+    bbox = xyz_to_bbox(x, y, z)
+    evalscript = get_evalscript("RGB", is_process=True)
+    
+    geometry = None
+    if wetland:
+        geometry = get_wetland_geometry(wetland)
+
+    url = "https://sh.dataspace.copernicus.eu/api/v1/process"
+    payload = {
+        "input": {
+            "bounds": {
+                "bbox": bbox,
+                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+            },
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
+                    "maxCloudCoverage": 20
+                }
+            }]
+        },
+        "output": {
+            "width": 256,
+            "height": 256,
+            "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
+        },
+        "evalscript": evalscript
+    }
+    
+    if geometry:
+        payload["input"]["bounds"]["geometry"] = geometry
+
     try:
-        file_path = os.path.join(temp_dir, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Determine file type and process
-        if file.filename.lower().endswith('.zip'):
-            # Assume it's a Zipped Shapefile
-            with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-            
-            # Find the .shp file
-            shp_files = [f for f in os.listdir(temp_dir) if f.endswith('.shp')]
-            if not shp_files:
-                raise HTTPException(400, "No .shp file found in ZIP")
-            gdf = gpd.read_file(os.path.join(temp_dir, shp_files[0]))
-            
-        elif file.filename.lower().endswith(('.kml', '.kmz')):
-            # KMZ is a zipped KML. Unzip it first for robust processing.
-            if file.filename.lower().endswith('.kmz'):
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                # Find the main KML file (usually doc.kml)
-                kml_files = [f for f in os.listdir(temp_dir) if f.lower().endswith('.kml')]
-                if not kml_files:
-                    raise HTTPException(400, "No valid KML file found inside KMZ")
-                file_path = os.path.join(temp_dir, kml_files[0])
-                logger.info(f"Extracted KML from KMZ: {kml_files[0]}")
-
-            # Robust KML reading (Multi-layer support)
-            try:
-                gdf = gpd.read_file(file_path)
-                if gdf.empty:
-                    layers = fiona.listlayers(file_path)
-                    all_gdfs = []
-                    for layer in layers:
-                        try:
-                            l_gdf = gpd.read_file(file_path, layer=layer)
-                            if not l_gdf.empty: all_gdfs.append(l_gdf)
-                        except: continue
-                    if all_gdfs:
-                        gdf = gpd.GeoDataFrame(pd.concat(all_gdfs, ignore_index=True))
-            except Exception as e:
-                logger.warning(f"Standard KML read failed, scanning layers: {e}")
-                layers = fiona.listlayers(file_path)
-                all_gdfs = []
-                for layer in layers:
-                    try:
-                        l_gdf = gpd.read_file(file_path, layer=layer)
-                        if not l_gdf.empty: all_gdfs.append(l_gdf)
-                    except: continue
-                if all_gdfs:
-                    gdf = gpd.GeoDataFrame(pd.concat(all_gdfs, ignore_index=True))
-                else:
-                    raise HTTPException(400, f"No se pudo procesar el KML/KMZ: {str(e)}")
-            
+        resp = http_session.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=payload, timeout=30)
+        if resp.status_code == 200:
+            return Response(content=resp.content, media_type="image/png")
         else:
-            raise HTTPException(400, "Unsupported file format. Use .kml, .kmz, or .zip (for SHP)")
+            logger.error(f"RGB tile error {resp.status_code}: {resp.text[:200]}")
+            return Response(content=b"", media_type="image/png", status_code=resp.status_code)
+    except Exception as ex:
+        logger.error(f"RGB tile network error: {ex}")
+        return Response(content=b"", media_type="image/png", status_code=500)
 
-        if gdf.empty:
-            raise HTTPException(400, "The uploaded file contains no valid geometry")
+@app.get("/api/tiles/metric/{mode}/{start_date}/{end_date}/{z}/{x}/{y}")
+async def get_metric_tile(mode: str, start_date: str, end_date: str, z: int, x: int, y: int, wetland: str = None):
+    """Serve a spectral index tile for the given mode, date range, and tile coordinates."""
+    token = get_cdse_token()
+    bbox = xyz_to_bbox(x, y, z)
+    evalscript = get_evalscript(mode, is_process=True)
+    
+    geometry = None
+    if wetland:
+        geometry = get_wetland_geometry(wetland)
 
-        # Convert to WGS84
-        if gdf.crs and gdf.crs.to_epsg() != 4326:
-            gdf = gdf.to_crs(epsg=4326)
-        
-        # Merge all geometries into a single polygon/multipolygon
-        combined_geom = gdf.geometry.unary_union
-        
-        # Force 2D coordinates (GEE can fail with 3D from KML)
-        combined_geom = transform(to_2d, combined_geom)
-        
-        # Convert to GeoJSON
-        feature = {
-            "type": "Feature",
-            "geometry": json.loads(gpd.GeoSeries([combined_geom]).to_json())['features'][0]['geometry'],
-            "properties": {"name": file.filename}
-        }
-        
-        # Calculate BBox
-        bounds = combined_geom.bounds # (minx, miny, maxx, maxy)
-        
+    url = "https://sh.dataspace.copernicus.eu/api/v1/process"
+    payload = {
+        "input": {
+            "bounds": {
+                "bbox": bbox,
+                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+            },
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
+                    "maxCloudCoverage": 20
+                }
+            }]
+        },
+        "output": {
+            "width": 256,
+            "height": 256,
+            "responses": [{"identifier": "default", "format": {"type": "image/png"}}]
+        },
+        "evalscript": evalscript
+    }
+    
+    if geometry:
+        payload["input"]["bounds"]["geometry"] = geometry
+
+    try:
+        resp = http_session.post(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, json=payload, timeout=30)
+        if resp.status_code == 200:
+            return Response(content=resp.content, media_type="image/png")
+        else:
+            logger.error(f"Metric tile error {resp.status_code}: {resp.text[:200]}")
+            return Response(content=b"", media_type="image/png", status_code=resp.status_code)
+    except Exception as ex:
+        logger.error(f"Metric tile network error: {ex}")
+        return Response(content=b"", media_type="image/png", status_code=500)
+
+@app.get("/api/thumb/{mode}/{start_date}/{end_date}")
+async def get_thumbnail(mode: str, start_date: str, end_date: str, wetland: str = None):
+    """Serve a static Sentinel-2 thumbnail image with caching."""
+    img_io = await asyncio.to_thread(fetch_thumbnail_bytes, mode, start_date, end_date, None, wetland)
+    if not img_io:
+        return Response(content=b"", media_type="image/png", status_code=404)
+    return Response(content=img_io.getvalue(), media_type="image/png")
+
+@app.post("/verify-credentials")
+async def verify_credentials(payload: dict):
+    """Verify CDSE credentials with Copernicus servers without permanently saving state."""
+    username = payload.get("username", "").strip()
+    password = payload.get("password", "").strip()
+    client_id = payload.get("client_id", "").strip()
+    client_secret = payload.get("client_secret", "").strip()
+    
+    token_url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+    try:
+        if username and password:
+            from oauthlib.oauth2 import LegacyApplicationClient
+            from requests_oauthlib import OAuth2Session
+            client = LegacyApplicationClient(client_id="cdse-public")
+            oauth = OAuth2Session(client=client)
+            token_resp = oauth.fetch_token(token_url=token_url, username=username, password=password)
+        elif client_id and client_secret:
+            from oauthlib.oauth2 import BackendApplicationClient
+            from requests_oauthlib import OAuth2Session
+            client = BackendApplicationClient(client_id=client_id)
+            oauth = OAuth2Session(client=client)
+            token_resp = oauth.fetch_token(token_url=token_url, client_id=client_id, client_secret=client_secret)
+        else:
+            raise HTTPException(400, "Debe ingresar email y contraseña o credenciales OAuth")
+            
+        expires_in = token_resp.get('expires_in', 600)
         return {
-            "status": "success",
-            "geojson": feature,
-            "bbox": [bounds[0], bounds[1], bounds[2], bounds[3]]
+            "status": "ok",
+            "message": "Acceso verificado exitosamente con Copernicus Hub (CDSE)",
+            "expires_in": expires_in
         }
-
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error processing spatial file: {e}")
-        raise HTTPException(500, detail=str(e))
-    finally:
-        # ignore_errors=True is important for Windows where files might be temporarily locked
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        err_text = str(e)
+        if "invalid_grant" in err_text.lower() or "unauthorized" in err_text.lower():
+            raise HTTPException(401, "Credenciales incorrectas. Verifique su correo y contraseña de dataspace.copernicus.eu")
+        raise HTTPException(400, f"Error al verificar credenciales con Copernicus: {err_text}")
+
+@app.post("/set-credentials")
+async def set_credentials(payload: dict):
+    """Set CDSE credentials at runtime. Accepts either:  
+    - {username, password} for standard Copernicus accounts  
+    - {client_id, client_secret} for OAuth service accounts
+    """
+    global CDSE_USERNAME, CDSE_PASSWORD, CDSE_CLIENT_ID, CDSE_CLIENT_SECRET
+    
+    username = payload.get("username", "").strip()
+    password = payload.get("password", "").strip()
+    client_id = payload.get("client_id", "").strip()
+    client_secret = payload.get("client_secret", "").strip()
+    
+    if username and password:
+        CDSE_USERNAME = username
+        CDSE_PASSWORD = password
+        CDSE_CLIENT_ID = ""
+        CDSE_CLIENT_SECRET = ""
+    elif client_id and client_secret:
+        CDSE_CLIENT_ID = client_id
+        CDSE_CLIENT_SECRET = client_secret
+        CDSE_USERNAME = ""
+        CDSE_PASSWORD = ""
+    else:
+        raise HTTPException(400, "Provide either {username + password} or {client_id + client_secret}")
+    
+    invalidate_cdse_token()
+    
+    # Verify credentials work
+    try:
+        get_cdse_token()
+    except Exception as e:
+        CDSE_USERNAME = ""
+        CDSE_PASSWORD = ""
+        CDSE_CLIENT_ID = ""
+        CDSE_CLIENT_SECRET = ""
+        raise HTTPException(401, f"Fallo de autenticación con Copernicus: {e}")
+    return {"status": "ok", "message": "Acceso a Copernicus verificado y activado con éxito"}
+
+@app.get("/credentials-status")
+async def credentials_status():
+    """Check whether CDSE credentials are configured."""
+    has_password = bool(CDSE_USERNAME and CDSE_PASSWORD)
+    has_oauth = bool(CDSE_CLIENT_ID and CDSE_CLIENT_SECRET)
+    return {"configured": has_password or has_oauth, "method": "password" if has_password else ("oauth" if has_oauth else "none")}
+
+@app.post("/parse-geometry")
+async def parse_geometry(file: UploadFile):
+    """Accept a SHP (zip), GeoJSON, KML or KMZ file and return a GeoJSON geometry."""
+    import tempfile
+    import zipfile as zipmod
+    
+    filename = file.filename or ""
+    ext = filename.lower().split(".")[-1]
+    content = await file.read()
+    
+    try:
+        import geopandas as gpd
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Handle KMZ (zipped KML)
+            if ext == "kmz":
+                kmz_path = os.path.join(tmpdir, "file.kmz")
+                with open(kmz_path, "wb") as f:
+                    f.write(content)
+                with zipmod.ZipFile(kmz_path, "r") as z:
+                    z.extractall(tmpdir)
+                # Find .kml inside
+                kml_files = [f for f in os.listdir(tmpdir) if f.lower().endswith(".kml")]
+                if not kml_files:
+                    raise HTTPException(400, "No KML found inside KMZ")
+                file_path = os.path.join(tmpdir, kml_files[0])
+                gdf = gpd.read_file(file_path, driver="KML")
+            # Handle Shapefile (expects a zip containing .shp, .dbf, .shx etc)
+            elif ext == "zip":
+                shp_path = os.path.join(tmpdir, "file.zip")
+                with open(shp_path, "wb") as f:
+                    f.write(content)
+                gdf = gpd.read_file(f"zip://{shp_path}")
+            # Handle KML
+            elif ext == "kml":
+                kml_path = os.path.join(tmpdir, "file.kml")
+                with open(kml_path, "wb") as f:
+                    f.write(content)
+                gdf = gpd.read_file(kml_path, driver="KML")
+            # Handle GeoJSON
+            elif ext in ("geojson", "json"):
+                geojson_path = os.path.join(tmpdir, "file.geojson")
+                with open(geojson_path, "wb") as f:
+                    f.write(content)
+                gdf = gpd.read_file(geojson_path)
+            else:
+                raise HTTPException(400, f"Unsupported format: .{ext}. Use SHP (zip), GeoJSON, KML or KMZ")
+            
+            # Reproject to WGS84
+            if gdf.crs and gdf.crs.to_epsg() != 4326:
+                gdf = gdf.to_crs(epsg=4326)
+            
+            # Merge all features into one geometry
+            union_geom = gdf.unary_union
+            centroid = union_geom.centroid
+            bounds = union_geom.bounds  # (minx, miny, maxx, maxy)
+            
+            return {
+                "status": "ok",
+                "geometry": json.loads(gpd.GeoSeries([union_geom]).to_json())["features"][0]["geometry"],
+                "centroid": {"lon": centroid.x, "lat": centroid.y},
+                "bounds": list(bounds),
+                "feature_count": len(gdf)
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"parse-geometry error: {e}")
+        raise HTTPException(500, f"Failed to parse geometry: {e}")
 
 @app.post("/generate-report")
 async def generate_report(request: dict):
     try:
         wetland_name = request.get('wetland_name', 'Humedal Desconocido')
-        logger.info(f"Generating report for: {wetland_name}")
-        
         wetland_metadata = request.get('wetland_metadata', {})
         analysis_results = request.get('analysis_results', {})
         start_date = request.get('start_date', '')
         end_date = request.get('end_date', '')
         
-        if not analysis_results:
-            logger.warning("No analysis results provided for report generation")
-            
-        logger.debug(f"Analysis results keys: {list(analysis_results.keys()) if analysis_results else 'None'}")
-        
-        doc_buffer = generate_wetland_report(wetland_name, wetland_metadata, analysis_results, start_date, end_date)
+        # Run report generation in worker thread to prevent event loop blocking
+        doc_buffer = await asyncio.to_thread(
+            generate_wetland_report,
+            wetland_name,
+            wetland_metadata,
+            analysis_results,
+            start_date,
+            end_date
+        )
         filename = f"Reporte_{wetland_name.replace(' ', '_')}_{end_date}.docx"
-        
-        logger.info(f"Report generated successfully: {filename}")
         
         return StreamingResponse(
             doc_buffer,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={
-                "Content-Disposition": f"attachment; filename={filename}",
-                "Access-Control-Expose-Headers": "Content-Disposition"
-            }
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
     except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        logger.error(f"Report Error: {e}")
-        logger.error(f"Traceback: {error_trace}")
+        print(f"Report Error: {e}")
         raise HTTPException(500, detail=f"Report generation failed: {str(e)}")
 
 @app.get("/")

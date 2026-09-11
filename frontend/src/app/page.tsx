@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import Map, { Source, Layer } from 'react-map-gl';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -14,8 +15,8 @@ import {
     AlertCircle,
     Settings,
     Maximize2,
-    Upload,
-    Trash2
+    ShieldCheck,
+    CheckCircle2
 } from 'lucide-react';
 import {
     XAxis,
@@ -70,11 +71,103 @@ interface ModeResult {
     };
 }
 
-const GlassPanel = ({ children, className = "", id }: { children: React.ReactNode, className?: string, id?: string }) => (
+const GlassPanel = ({ children, className = "", id }: { children?: React.ReactNode, className?: string, id?: string }) => (
     <div id={id} className={`bg-gray-900/60 backdrop-blur-xl border border-white/10 rounded-2xl ${className}`}>
         {children}
     </div>
 );
+
+// Helper — calculate optimal balanced zoom to fit bounds [minX, minY, maxX, maxY] with generous breathing room
+const getOptimalZoom = (
+    bounds: [number, number, number, number],
+    mapWidth = 420,
+    mapHeight = 280,
+    paddingX = 110,
+    paddingY = 85
+): number => {
+    const [minX, minY, maxX, maxY] = bounds;
+    const lonDiff = Math.max(0.0001, Math.abs(maxX - minX));
+    const latDiff = Math.max(0.0001, Math.abs(maxY - minY));
+
+    const adjustedWidth = Math.max(60, mapWidth - paddingX * 2);
+    const adjustedHeight = Math.max(50, mapHeight - paddingY * 2);
+
+    // Mercator projection math
+    const lat1 = (minY * Math.PI) / 180;
+    const lat2 = (maxY * Math.PI) / 180;
+    const merc1 = Math.log(Math.tan(Math.PI / 4 + lat1 / 2));
+    const merc2 = Math.log(Math.tan(Math.PI / 4 + lat2 / 2));
+    const yDiff = Math.max(0.0001, Math.abs(merc2 - merc1));
+
+    const zoomX = Math.log2((adjustedWidth / 256) * (360 / lonDiff));
+    const zoomY = Math.log2((adjustedHeight / 256) * ((2 * Math.PI) / yDiff));
+
+    // Balanced zoom: leaves ~50% context around the wetland so it does not feel giant or touch UI borders
+    const optimalZoom = Math.min(zoomX, zoomY) - 0.35;
+    return Math.max(4, Math.min(15.5, Number(optimalZoom.toFixed(1))));
+};
+
+// Helper — extract bounding box [minX, minY, maxX, maxY] from any GeoJSON geometry
+const getBoundsFromGeometry = (geometry: any): [number, number, number, number] | null => {
+    if (!geometry) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+    const extractCoords = (coords: any) => {
+        if (!Array.isArray(coords)) return;
+        if (coords.length >= 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+            const [x, y] = coords;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        } else {
+            coords.forEach(extractCoords);
+        }
+    };
+
+    if (geometry.coordinates) {
+        extractCoords(geometry.coordinates);
+    }
+    if (minX !== Infinity && maxX !== -Infinity && minY !== Infinity && maxY !== -Infinity) {
+        return [minX, minY, maxX, maxY];
+    }
+    return null;
+};
+
+// Helper — resample sorted daily points to monthly averages
+const resampleToMonthly = (dailyData: any[]): any[] => {
+    const months: Record<string, { points: any[]; keys: Set<string> }> = {};
+    dailyData.forEach(pt => {
+        const month = pt.date.substring(0, 7); // YYYY-MM
+        if (!months[month]) months[month] = { points: [], keys: new Set() };
+        months[month].points.push(pt);
+        Object.keys(pt).forEach(k => k !== 'date' && months[month].keys.add(k));
+    });
+
+    return Object.entries(months)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([month, { points, keys }]) => {
+            const agg: any = { date: month };
+            keys.forEach(key => {
+                if (key.endsWith('_outlier')) {
+                    agg[key] = points.some(p => p[key]);
+                } else {
+                    const vals = points.map(p => p[key]).filter(v => v !== null && v !== undefined && !isNaN(v));
+                    agg[key] = vals.length > 0 ? Number((vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(3)) : null;
+                }
+            });
+            return agg;
+        });
+};
+
+const METRIC_NAMES: Record<string, string> = {
+    Hydrology: 'MNDWI (Hidrología)',
+    Vegetation: 'NDRE (Vegetación)',
+    WaterQuality: 'NDCI (Calidad Agua)',
+    SoilVegetation: 'SAVI (Veg./Suelo)',
+    AlgaeBloom: 'FAI (Algas)',
+    WaterRatio: 'WRI (Ratio Agua)'
+};
 
 // Helper for merging time series
 const mergeTimeSeries = (results: Record<string, ModeResult>) => {
@@ -92,33 +185,33 @@ const mergeTimeSeries = (results: Record<string, ModeResult>) => {
         const point: any = { date };
 
         // Hydrology (MNDWI)
-        const hydroPoint = results['Hydrology']?.time_series?.find((p: any) => p.date === date);
-        point.Hydrology = hydroPoint ? hydroPoint.value : null;
+        const hydroPoint = results['Hydrology']?.time_series.find(p => p.date === date);
+        point.Hydrology = hydroPoint != null && typeof hydroPoint.value === 'number' ? Number(hydroPoint.value.toFixed(3)) : null;
         point.Hydrology_outlier = hydroPoint?.is_outlier || false;
 
         // Vegetation (NDRE)
-        const vegPoint = results['Vegetation']?.time_series?.find((p: any) => p.date === date);
-        point.Vegetation = vegPoint ? vegPoint.value : null;
+        const vegPoint = results['Vegetation']?.time_series.find(p => p.date === date);
+        point.Vegetation = vegPoint != null && typeof vegPoint.value === 'number' ? Number(vegPoint.value.toFixed(3)) : null;
         point.Vegetation_outlier = vegPoint?.is_outlier || false;
 
         // WaterQuality (NDCI)
-        const qualPoint = results['WaterQuality']?.time_series?.find((p: any) => p.date === date);
-        point.WaterQuality = qualPoint ? qualPoint.value : null;
+        const qualPoint = results['WaterQuality']?.time_series.find(p => p.date === date);
+        point.WaterQuality = qualPoint != null && typeof qualPoint.value === 'number' ? Number(qualPoint.value.toFixed(3)) : null;
         point.WaterQuality_outlier = qualPoint?.is_outlier || false;
 
         // SoilVegetation (SAVI)
-        const saviPoint = results['SoilVegetation']?.time_series?.find((p: any) => p.date === date);
-        point.SoilVegetation = saviPoint ? saviPoint.value : null;
+        const saviPoint = results['SoilVegetation']?.time_series.find(p => p.date === date);
+        point.SoilVegetation = saviPoint != null && typeof saviPoint.value === 'number' ? Number(saviPoint.value.toFixed(3)) : null;
         point.SoilVegetation_outlier = saviPoint?.is_outlier || false;
 
         // AlgaeBloom (FAI)
-        const faiPoint = results['AlgaeBloom']?.time_series?.find((p: any) => p.date === date);
-        point.AlgaeBloom = faiPoint ? faiPoint.value : null;
+        const faiPoint = results['AlgaeBloom']?.time_series.find(p => p.date === date);
+        point.AlgaeBloom = faiPoint != null && typeof faiPoint.value === 'number' ? Number(faiPoint.value.toFixed(3)) : null;
         point.AlgaeBloom_outlier = faiPoint?.is_outlier || false;
 
         // WaterRatio (WRI)
-        const wriPoint = results['WaterRatio']?.time_series?.find((p: any) => p.date === date);
-        point.WaterRatio = wriPoint ? wriPoint.value : null;
+        const wriPoint = results['WaterRatio']?.time_series.find(p => p.date === date);
+        point.WaterRatio = wriPoint != null && typeof wriPoint.value === 'number' ? Number(wriPoint.value.toFixed(3)) : null;
         point.WaterRatio_outlier = wriPoint?.is_outlier || false;
 
         return point;
@@ -165,16 +258,16 @@ const LEGENDS: any = {
 };
 
 interface IndexCardProps {
+    key?: string | number;
     mode: any;
     res: ModeResult | undefined;
     legend: any;
     viewState: any;
     onMove: (evt: any) => void;
     viewYear: 'start' | 'end';
-    selectedWetland?: any;
 }
 
-const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, selectedWetland }: IndexCardProps) => {
+const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear }: IndexCardProps) => {
 
     // Determine which map tiles to use
     let rgbTile = res?.maps?.rgb;
@@ -191,51 +284,50 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, selectedWet
 
     return (
         <div key={mode.id} className={`bg-black/40 border ${mode.border} rounded-2xl flex flex-col relative overflow-hidden group hover:border-white/20 transition-all`}>
-            {/* HEADER */}
-            <div className="p-3 z-10 bg-gradient-to-b from-black/90 to-transparent flex justify-between items-start pointer-events-none">
-                <div className="flex flex-col gap-1 w-full relative">
-                    <div className="flex items-center justify-between w-full">
-                        <div className="flex items-center gap-2 mb-1">
-                            <mode.icon className={`w-4 h-4 ${mode.color}`} />
-                            <span className="text-sm font-bold tracking-widest text-gray-300">
-                                {mode.title} <span className="text-gray-400 font-normal">({mode.acronym})</span>
-                            </span>
-                        </div>
-                        {/* CONTROLS REMOVED */}
-                    </div>
-
-                    <div className="text-3xl font-mono font-medium text-white drop-shadow-md mt-1 flex items-center justify-between">
-                        <span>
-                            {res?.stats?.trend != null ? 
-                                `${res.stats.trend > 0 ? '+' : ''}${res.stats.trend.toFixed(1)}%` : 
-                                '0.0%'
-                            }
+            {/* COMPACT HEADER */}
+            <div className="p-2.5 z-10 bg-gradient-to-b from-black/85 via-black/40 to-transparent flex flex-col gap-0.5 pointer-events-none">
+                <div className="flex items-center justify-between w-full">
+                    <div className="flex items-center gap-1.5">
+                        <mode.icon className={`w-3.5 h-3.5 ${mode.color}`} />
+                        <span className="text-xs font-bold tracking-wider text-gray-200">
+                            {mode.title} <span className="text-gray-400 font-normal text-[10px]">({mode.acronym})</span>
                         </span>
-                        <div className={`text-xs font-mono px-2 py-1 rounded-lg backdrop-blur-md border border-white/10 text-gray-400 font-normal`}>
-                             {res?.stats?.current != null ? res.stats.current.toFixed(4) : '---'}
-                        </div>
                     </div>
 
-                    {/* Robust Statistics */}
-                    {res?.stats?.current_std != null && (
-                        <div className="flex flex-col gap-1 mt-1 pl-1">
-                            <div className="text-xs text-gray-400 font-mono flex items-center gap-1">
-                                <span className="text-gray-500">σ:</span> ±{res.stats.current_std.toFixed(4)}
-                            </div>
+                    {/* Absolute Median Change (Delta) badge top-right */}
+                    {res?.stats?.trend != null && (
+                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md backdrop-blur-md border font-bold shadow-sm ${
+                            res.stats.trend >= 0
+                                ? 'bg-green-500/15 text-green-400 border-green-500/30'
+                                : 'bg-red-500/15 text-red-400 border-red-500/30'
+                        }`} title={`Cambio absoluto interanual (Δ mediana): ${res.stats.trend >= 0 ? '+' : ''}${res.stats.trend.toFixed(3)}`}>
+                            Δ {res.stats.trend >= 0 ? '+' : ''}{res.stats.trend.toFixed(3)}
+                        </span>
+                    )}
+                </div>
+
+                <div className="flex items-baseline gap-2.5 mt-0.5">
+                    <span className="text-2xl font-mono font-bold text-white drop-shadow-md">
+                        {res?.stats?.current != null ? res.stats.current.toFixed(3) : '---'}
+                    </span>
+
+                    {/* Robust Statistics Inline */}
+                    {res?.stats && (
+                        <div className="flex items-center gap-2 text-[10px] text-gray-400 font-mono">
+                            {res.stats.current_std != null && (
+                                <span><span className="text-gray-500">σ:</span> ±{res.stats.current_std.toFixed(3)}</span>
+                            )}
                             {res.stats.cv != null && (
-                                <div className="text-xs text-gray-400 font-mono flex items-center gap-1">
-                                    <span className="text-gray-500">CV:</span> {res.stats.cv.toFixed(1)}%
-                                </div>
+                                <span><span className="text-gray-500">CV:</span> {res.stats.cv.toFixed(1)}%</span>
                             )}
                             {res.stats.outlier_count != null && res.stats.outlier_count > 0 && (
-                                <div className="text-xs text-yellow-400 font-mono flex items-center gap-1 bg-yellow-400/10 px-1.5 py-0.5 rounded-full w-fit border border-yellow-400/20">
-                                    ⚠ {res.stats.outlier_count} outliers
-                                </div>
+                                <span className="text-yellow-400 bg-yellow-400/10 px-1.5 py-0.2 rounded-full border border-yellow-400/20 text-[9px]">
+                                    ⚠ {res.stats.outlier_count}
+                                </span>
                             )}
                         </div>
                     )}
                 </div>
-
             </div>
 
             {/* MAP BACKGROUND */}
@@ -250,27 +342,34 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, selectedWet
                     reuseMaps={true}
                 >
                     {res && rgbTile && metricTile && (
-                        <>
-                            <Source id={`${mode.id}-rgb-${viewYear}`} type="raster" tiles={[rgbTile]} tileSize={256}>
-                                <Layer id={`${mode.id}-rgb-layer-${viewYear}`} type="raster" paint={{ 'raster-opacity': 0.6 }} />
+                        <React.Fragment key={`${mode.id}-${viewYear}`}>
+                            <Source
+                                key={`src-rgb-${mode.id}-${viewYear}-${rgbTile}`}
+                                id={`${mode.id}-rgb`}
+                                type="raster"
+                                tiles={[rgbTile]}
+                                tileSize={256}
+                            >
+                                <Layer
+                                    id={`${mode.id}-rgb-layer`}
+                                    type="raster"
+                                    paint={{ 'raster-opacity': 0.6 }}
+                                />
                             </Source>
-                            <Source id={`${mode.id}-metric-${viewYear}`} type="raster" tiles={[metricTile]} tileSize={256}>
-                                <Layer id={`${mode.id}-metric-layer-${viewYear}`} type="raster" paint={{}} />
+                            <Source
+                                key={`src-metric-${mode.id}-${viewYear}-${metricTile}`}
+                                id={`${mode.id}-metric`}
+                                type="raster"
+                                tiles={[metricTile]}
+                                tileSize={256}
+                            >
+                                <Layer
+                                    id={`${mode.id}-metric-layer`}
+                                    type="raster"
+                                    paint={{}}
+                                />
                             </Source>
-                        </>
-                    )}
-                    {selectedWetland?.geometry && (
-                        <Source id={`${mode.id}-geometry`} type="geojson" data={{ type: "Feature", geometry: selectedWetland.geometry, properties: {} }}>
-                            <Layer
-                                id={`${mode.id}-geometry-layer`}
-                                type="line"
-                                paint={{
-                                    'line-color': '#fbbf24',
-                                    'line-width': 3,
-                                    'line-dasharray': [2, 2]
-                                }}
-                            />
-                        </Source>
+                        </React.Fragment>
                     )}
                 </Map>
             </div>
@@ -278,13 +377,13 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, selectedWet
             {/* LEGEND OVERLAY */}
             <div className="absolute bottom-2 left-2 right-2 z-10 pointer-events-none">
                 <GlassPanel className="p-1.5 backdrop-blur-md bg-black/60 !rounded-lg border-white/5">
-                    <div className="flex justify-between text-[10px] text-gray-200 uppercase font-bold mb-0.5">
+                    <div className="flex justify-between text-[8px] text-gray-300 uppercase font-bold mb-0.5">
                         <span>{legend.labels[0]}</span>
                         <span>{legend.title}</span>
                         <span>{legend.labels[2]}</span>
                     </div>
-                    <div className="h-2 w-full rounded-full mb-0.5" style={{ background: legend.gradient }} />
-                    <div className="flex justify-between text-[9px] text-gray-400 font-medium">
+                    <div className="h-1.5 w-full rounded-full mb-0.5" style={{ background: legend.gradient }} />
+                    <div className="flex justify-between text-[7px] text-gray-400 font-medium">
                         <span>{legend.descriptions[0]}</span>
                         <span>{legend.descriptions[1]}</span>
                         <span>{legend.descriptions[2]}</span>
@@ -300,18 +399,15 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, selectedWet
 export default function Dashboard() {
     // --- STATE ---
     const [loading, setLoading] = useState(false);
+    const [generatingReport, setGeneratingReport] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    // Auth
-    const [accessToken, setAccessToken] = useState<string | null>(null);
-    const [clientId, setClientId] = useState('');
-    const [projectId, setProjectId] = useState('');
-    const [showSettings, setShowSettings] = useState(false);
-    const [scriptsLoaded, setScriptsLoaded] = useState(false);
+    // Auth (Simplified for CDSE backend)
+    const [isApiReady, setIsApiReady] = useState(true);
 
     // Analysis
     const [startDate, setStartDate] = useState('2016-03-01');
-    const [endDate, setEndDate] = useState(new Date().toISOString().split('T')[0]);
+    const [endDate, setEndDate] = useState('2026-01-22');
     const [results, setResults] = useState<Record<string, ModeResult> | null>(null);
     const [mergedData, setMergedData] = useState<any[]>([]);
     const [processLog, setProcessLog] = useState<string[]>([]);
@@ -333,32 +429,53 @@ export default function Dashboard() {
     const [selectedWetland, setSelectedWetland] = useState<any | null>(null);
     const [showSuggestions, setShowSuggestions] = useState(false);
 
-    // Custom Geometry
-    const [customGeometry, setCustomGeometry] = useState<any | null>(null);
+    // CDSE Credentials
+    const [cdseUsername, setCdseUsername] = useState('');
+    const [cdsePassword, setCdsePassword] = useState('');
+    const [cdseConfigured, setCdseConfigured] = useState(false);
+    const [cdseError, setCdseError] = useState<string | null>(null);
+    const [cdseSuccess, setCdseSuccess] = useState<string | null>(null);
+    const [showCredentials, setShowCredentials] = useState(false);
+    const [savingCreds, setSavingCreds] = useState(false);
+    const [verifyingCreds, setVerifyingCreds] = useState(false);
+
+    // Custom Area
+    const [customArea, setCustomArea] = useState<any | null>(null);
+    const [customAreaName, setCustomAreaName] = useState<string>('');
     const [uploadingFile, setUploadingFile] = useState(false);
+    const [fileError, setFileError] = useState<string | null>(null);
+    const [areaSource, setAreaSource] = useState<'wetland' | 'custom'>('wetland');
+
+    // Search dropdown portal
+    const searchInputRef = useRef<HTMLInputElement>(null);
+    const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
+
+    const updateDropdownRect = useCallback(() => {
+        if (searchInputRef.current) {
+            setDropdownRect(searchInputRef.current.getBoundingClientRect());
+        }
+    }, []);
 
     // --- EFFECTS ---
     useEffect(() => {
-        const savedClientId = localStorage.getItem('gee_client_id');
-        if (savedClientId) setClientId(savedClientId);
-
-        const savedProjectId = localStorage.getItem('gee_project_id');
-        if (savedProjectId) setProjectId(savedProjectId);
-
         fetch('/wetlands.json')
             .then(res => res.json())
             .then(setWetlands)
             .catch(console.error);
 
-        const checkGoogle = setInterval(() => {
-            // @ts-ignore
-            if (window.google && window.google.accounts) {
-                setScriptsLoaded(true);
-                clearInterval(checkGoogle);
-            }
-        }, 500);
-
-        return () => clearInterval(checkGoogle);
+        // Check CDSE credentials status
+        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        axios.get(`${API}/credentials-status`)
+            .then(r => {
+                setCdseConfigured(r.data.configured);
+                if (!r.data.configured) {
+                    setShowCredentials(true);
+                }
+            })
+            .catch(() => {
+                setCdseConfigured(false);
+                setShowCredentials(true);
+            });
     }, []);
 
     useEffect(() => {
@@ -382,94 +499,138 @@ export default function Dashboard() {
         setSearchQuery(wetland.name);
         setShowSuggestions(false); // Auto-close suggestions
 
-        const [minX, minY, maxX, maxY] = wetland.bbox;
-        setViewState({
-            longitude: (minX + maxX) / 2,
-            latitude: (minY + maxY) / 2,
-            zoom: 12
-        });
-        setCustomGeometry(null); // Clear custom geometry when choosing an inventoried wetland
-    };
-
-    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-
-        setUploadingFile(true);
-        setError(null);
-        setProcessLog(prev => [...prev, `⚙️  Procesando archivo: ${file.name}`]);
-
-        const formData = new FormData();
-        formData.append('file', file);
-
-        try {
-            const res = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/process-spatial-file`, formData);
-            if (res.data.status === 'success') {
-                const geojson = res.data.geojson;
-                const bbox = res.data.bbox;
-
-                // Create a virtual wetland object for the "main process"
-                const virtualWetland = {
-                    id: 'custom-' + Date.now(),
-                    name: file.name,
-                    code: 'CUSTOM',
-                    region: 'Carga Local',
-                    bbox: bbox,
-                    geometry: geojson.geometry, // The geometry object
-                };
-
-                setSelectedWetland(virtualWetland);
-                setCustomGeometry(geojson); // Keep for visualization layer if needed
-                setSearchQuery(file.name);
-
-                const [minX, minY, maxX, maxY] = bbox;
-                setViewState({
-                    longitude: (minX + maxX) / 2,
-                    latitude: (minY + maxY) / 2,
-                    zoom: 13
-                });
-                setProcessLog(prev => [...prev, "✓  Archivo procesado e integrado"]);
-            }
-        } catch (err: any) {
-            console.error("Upload error:", err);
-            const detail = err.response?.data?.detail || "Error al procesar archivo espacial";
-            setError(detail);
-            setProcessLog(prev => [...prev, `✗  ERR: ${detail}`]);
-        } finally {
-            setUploadingFile(false);
-            if (e.target) e.target.value = '';
+        if (wetland.bbox) {
+            const [minX, minY, maxX, maxY] = wetland.bbox;
+            const optimalZoom = getOptimalZoom([minX, minY, maxX, maxY]);
+            setViewState({
+                longitude: (minX + maxX) / 2,
+                latitude: (minY + maxY) / 2,
+                zoom: optimalZoom
+            });
         }
     };
 
     const saveSettings = (e: React.FormEvent) => {
         e.preventDefault();
-        localStorage.setItem('gee_client_id', clientId);
-        localStorage.setItem('gee_project_id', projectId);
-        setShowSettings(false);
     };
 
-    const handleLogin = () => {
-        if (!scriptsLoaded || !clientId) {
-            setShowSettings(true);
+    const handleLogin = () => { };
+
+    const handleVerifyAccess = async () => {
+        if (!cdseUsername || !cdsePassword) {
+            setCdseError('Ingresa tu email y contraseña de Copernicus para verificar.');
+            setCdseSuccess(null);
             return;
         }
-        // @ts-ignore
-        const client = google.accounts.oauth2.initTokenClient({
-            client_id: clientId,
-            scope: 'https://www.googleapis.com/auth/earthengine https://www.googleapis.com/auth/userinfo.email',
-            callback: (resp: any) => {
-                if (resp.access_token) setAccessToken(resp.access_token);
-                else setError(resp.error);
-            },
-        });
-        client.requestAccessToken();
+        setVerifyingCreds(true);
+        setCdseError(null);
+        setCdseSuccess(null);
+        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        try {
+            const res = await axios.post(`${API}/verify-credentials`, {
+                username: cdseUsername,
+                password: cdsePassword
+            });
+            setCdseSuccess(res.data?.message || 'Acceso verificado exitosamente con Copernicus Hub.');
+            setProcessLog(prev => [...prev, '[OK] Acceso a Copernicus CDSE verificado']);
+        } catch (err: any) {
+            const msg = err.response?.data?.detail || 'Error verificando acceso en Copernicus Hub';
+            setCdseError(msg);
+        } finally {
+            setVerifyingCreds(false);
+        }
     };
 
+    const handleSetCredentials = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setSavingCreds(true);
+        setCdseError(null);
+        setCdseSuccess(null);
+        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        try {
+            await axios.post(`${API}/set-credentials`, {
+                username: cdseUsername,
+                password: cdsePassword
+            });
+            setCdseConfigured(true);
+            setCdseSuccess('Conectado y listo para procesar imágenes Sentinel-2.');
+            setProcessLog(prev => [...prev, '[OK] Credenciales CDSE activadas correctamente']);
+            setTimeout(() => {
+                setShowCredentials(false);
+                setCdseSuccess(null);
+            }, 1200);
+        } catch (err: any) {
+            const msg = err.response?.data?.detail || 'Error configurando credenciales';
+            setCdseError(msg);
+        } finally {
+            setSavingCreds(false);
+        }
+    };
 
+    const handleFileUpload = async (file: File) => {
+        setUploadingFile(true);
+        setFileError(null);
+        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        const formData = new FormData();
+        formData.append('file', file);
+        try {
+            const res = await axios.post(`${API}/parse-geometry`, formData, {
+                headers: { 'Content-Type': 'multipart/form-data' }
+            });
+            const { geometry, centroid, bounds } = res.data;
+            setCustomArea(geometry);
+            setCustomAreaName(file.name.replace(/\.[^.]+$/, ''));
+            setAreaSource('custom');
+            setSelectedWetland(null);
+            setSearchQuery('');
+            const optimalZoom = bounds ? getOptimalZoom(bounds) : 12;
+            setViewState({
+                longitude: centroid.lon,
+                latitude: centroid.lat,
+                zoom: optimalZoom
+            });
+            setProcessLog(prev => [...prev, `✓  Área personalizada cargada: ${file.name} (Zoom óptimo: ${optimalZoom})`]);
+        } catch (err: any) {
+            const msg = err.response?.data?.detail || 'Error al leer el archivo';
+            setFileError(msg);
+        } finally {
+            setUploadingFile(false);
+        }
+    };
+
+    const fitToWetland = () => {
+        let activeBounds: [number, number, number, number] | null = null;
+        if (areaSource === 'wetland' && selectedWetland?.bbox) {
+            activeBounds = selectedWetland.bbox;
+        } else if (areaSource === 'custom' && customArea) {
+            activeBounds = getBoundsFromGeometry(customArea);
+        } else if (selectedWetland?.geometry) {
+            activeBounds = getBoundsFromGeometry(selectedWetland.geometry);
+        }
+
+        if (activeBounds) {
+            const centerLon = (activeBounds[0] + activeBounds[2]) / 2;
+            const centerLat = (activeBounds[1] + activeBounds[3]) / 2;
+            const optimalZoom = getOptimalZoom(activeBounds);
+            setViewState({
+                longitude: centerLon,
+                latitude: centerLat,
+                zoom: optimalZoom
+            });
+            setProcessLog(prev => [...prev, `🔍 Vista reajustada a visión total (Zoom: ${optimalZoom})`]);
+        }
+    };
 
     const handleAnalyze = async () => {
-        if (!accessToken || !projectId) {
-            setError("Requiere autenticación y Project ID.");
+        if (!cdseConfigured) {
+            setShowCredentials(true);
+            setError("Debes ingresar y verificar tus credenciales de Copernicus CDSE antes de iniciar el análisis.");
+            return;
+        }
+
+        const hasArea = areaSource === 'wetland' ? !!selectedWetland : !!customArea;
+        if (!hasArea) {
+            setError("Selecciona un humedal o carga un área personalizada.");
             return;
         }
 
@@ -477,46 +638,72 @@ export default function Dashboard() {
         setError(null);
         setResults(null);
         setProcessLog(["⚙️  Iniciando análisis multi-espectral..."]);
-
-        // Reset view year to end by default on new analysis
         setViewYear('end');
 
-        let aoiGeometry;
-        if (selectedWetland) {
-            // Use exact polygon from inventory/upload if available, otherwise fallback to bbox
+        let aoiGeometry: any;
+        let activeBounds: [number, number, number, number] | null = null;
+        let centerLon = viewState.longitude;
+        let centerLat = viewState.latitude;
+
+        if (areaSource === 'custom' && customArea) {
+            aoiGeometry = customArea;
+            activeBounds = getBoundsFromGeometry(customArea);
+        } else if (selectedWetland) {
             if (selectedWetland.geometry) {
                 aoiGeometry = selectedWetland.geometry;
             } else if (selectedWetland.bbox) {
                 const [minX, minY, maxX, maxY] = selectedWetland.bbox;
                 aoiGeometry = { type: "Polygon", coordinates: [[[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY], [minX, minY]]] };
             }
+            if (selectedWetland.bbox) {
+                activeBounds = selectedWetland.bbox;
+            } else if (aoiGeometry) {
+                activeBounds = getBoundsFromGeometry(aoiGeometry);
+            }
+        } else {
+            aoiGeometry = { type: "Polygon", coordinates: [[[-70.7, -33.3], [-70.8, -33.3], [-70.8, -33.4], [-70.7, -33.4], [-70.7, -33.3]]] };
         }
 
-        if (!aoiGeometry) {
-            setError("Selecciona un humedal o sube un archivo (KML/SHP)");
-            setLoading(false);
-            return;
+        // AUTO-FIT: Al momento de generar los cálculos, abarcar el acercamiento total que permita la visión total del humedal
+        if (activeBounds) {
+            centerLon = (activeBounds[0] + activeBounds[2]) / 2;
+            centerLat = (activeBounds[1] + activeBounds[3]) / 2;
+            const optimalZoom = getOptimalZoom(activeBounds);
+            setViewState({
+                longitude: centerLon,
+                latitude: centerLat,
+                zoom: optimalZoom
+            });
+            setProcessLog(prev => [...prev, `🔍 Vista encuadrada para visión total (Zoom óptimo: ${optimalZoom})`]);
         }
 
         const payload = {
-            geojson: { type: "Feature", geometry: aoiGeometry, properties: { name: selectedWetland.name } },
+            geojson: { type: "Feature", geometry: aoiGeometry },
             startDate,
             endDate,
-            projectId,
+            wetlandName: selectedWetland?.name || null
         };
 
         try {
-            setProcessLog(prev => [...prev, "⚙️  Procesando todos los índices..."]);
+            setProcessLog(prev => [...prev, "⚙️  Procesando todos los índices con CDSE..."]);
             // Use analyze-all endpoint
-            const res = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/analyze-all`, payload, {
-                headers: { Authorization: `Bearer ${accessToken}` }
-            });
+            const res = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/analyze-all`, payload);
 
             if (res.data.status === 'success') {
                 const data = res.data.data;
                 setResults(data);
-                setMergedData(mergeTimeSeries(data));
+                setMergedData(resampleToMonthly(mergeTimeSeries(data)));
                 setProcessLog(prev => [...prev, "✓  Análisis finalizado exitosamente"]);
+
+                // Re-confirmar encuadre total para los mapas satelitales recién generados
+                if (activeBounds) {
+                    const optimalZoom = getOptimalZoom(activeBounds);
+                    setViewState({
+                        longitude: centerLon,
+                        latitude: centerLat,
+                        zoom: optimalZoom
+                    });
+                }
             }
         } catch (err: any) {
             console.error("Analysis error:", err);
@@ -536,84 +723,56 @@ export default function Dashboard() {
         }
 
         try {
-            setLoading(true); // Show loading indicator
-            setProcessLog(prev => [...prev, "📄 Preparando datos para el reporte..."]);
-            const centerLat = viewState?.latitude ? viewState.latitude.toFixed(4) : "0.0000";
-            const centerLon = viewState?.longitude ? viewState.longitude.toFixed(4) : "0.0000";
+            setGeneratingReport(true); // Show report generation indicator
+            setProcessLog(prev => [...prev, "📄 Generando reporte (esto puede tardar unos segundos)..."]);
+
+            const bbox = selectedWetland.bbox;
+            const centerLat = ((bbox[1] + bbox[3]) / 2).toFixed(4);
+            const centerLon = ((bbox[0] + bbox[2]) / 2).toFixed(4);
 
             const reportPayload = {
                 wetland_name: selectedWetland.name,
                 wetland_metadata: {
-                    region: selectedWetland.region || 'N/A',
-                    code: selectedWetland.code || 'CUSTOM',
-                    coordinates: `${centerLat}, ${centerLon}`
+                    region: selectedWetland.region,
+                    code: selectedWetland.code || 'N/A',
+                    coordinates: `${centerLat}, ${centerLon}`,
+                    geometry: selectedWetland.geometry || customArea || null
                 },
                 analysis_results: results,
                 start_date: startDate,
                 end_date: endDate
             };
 
-            // Use fetch instead of axios to have strict control over response headers and blob handling
-            const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/generate-report`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                },
-                body: JSON.stringify(reportPayload)
+            const res = await axios.post(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/generate-report`, reportPayload, {
+                responseType: 'blob'
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            // Extract filename from the Content-Disposition header if possible
-            let filename = `Reporte_${selectedWetland.name.replace(/\.[^/.]+$/, "").replace(/\s+/g, '_')}_${endDate}.docx`;
-            const disposition = response.headers.get('Content-Disposition');
-            if (disposition && disposition.indexOf('filename=') !== -1) {
-                const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-                const matches = filenameRegex.exec(disposition);
-                if (matches != null && matches[1]) {
-                    filename = matches[1].replace(/['"]/g, '');
-                }
-            }
-
-            const blob = await response.blob();
-            // Force the specific MIME type for docx
-            const secureBlob = new Blob([blob], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-            const url = window.URL.createObjectURL(secureBlob);
-
+            // Download file
+            const url = window.URL.createObjectURL(new Blob([res.data]));
             const link = document.createElement('a');
             link.href = url;
-            link.download = filename;
-            link.style.display = 'none';
-
-            // Required for Firefox but also safe for Chrome
+            link.setAttribute('download', `Reporte_${selectedWetland.name.replace(/\s+/g, '_')}_${endDate}.docx`);
             document.body.appendChild(link);
             link.click();
-
-            // Longer delay to strictly ensure the user's OS registers the file saving intent
-            setTimeout(() => {
-                document.body.removeChild(link);
-                window.URL.revokeObjectURL(url);
-            }, 2000);
+            link.remove();
+            window.URL.revokeObjectURL(url);
 
             setProcessLog(prev => [...prev, "✓  Reporte descargado exitosamente"]);
-        } catch (err: any) {
-            const errMsg = err.message || err.toString();
-            alert(`Error interno en el navegador: ${errMsg}`);
-            setProcessLog(prev => [...prev, `✗  Error local: ${errMsg.substring(0, 50)}`]);
+        } catch (err) {
+            console.error(err);
+            alert('Error al generar el reporte. Revisa la consola para más detalles.');
+            setProcessLog(prev => [...prev, "✗  Error al generar reporte"]);
         } finally {
-            setLoading(false);
+            setGeneratingReport(false);
         }
     };
 
     // --- RENDER ---
     return (
-        <div className="min-h-screen bg-[#050505] text-white flex flex-col md:flex-row overflow-hidden font-sans">
+        <div className="min-h-screen bg-[#050505] text-white flex overflow-hidden font-sans">
 
             {/* SIDEBAR */}
-            <aside className="w-full md:w-80 h-auto md:h-screen p-6 flex flex-col gap-6 z-20 pointer-events-auto bg-black border-b md:border-b-0 md:border-r border-white/5 overflow-x-hidden overflow-y-auto custom-scrollbar shrink-0">
+            <aside className="w-80 h-screen p-6 flex flex-col gap-6 z-20 pointer-events-auto bg-black border-r border-white/5 overflow-y-auto custom-scrollbar">
                 <div className="flex items-center gap-3 mb-2">
                     <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center shadow-[0_0_20px_rgba(37,99,235,0.5)]">
                         <Activity className="text-white w-6 h-6" />
@@ -621,70 +780,179 @@ export default function Dashboard() {
                     <h1 className="text-xl font-bold tracking-tight">WETLAND<span className="text-blue-500">MONITOR</span></h1>
                 </div>
 
-                {/* 1. AUTH */}
+                {/* 1. CDSE STATUS + CREDENTIALS */}
                 <GlassPanel className="p-4 flex flex-col gap-3">
-                    {!accessToken ? (
-                        <button
-                            onClick={handleLogin}
-                            disabled={!scriptsLoaded}
-                            className={`
-                                relative overflow-hidden
-                                w-full py-3 px-4 rounded-xl font-bold text-sm
-                                transition-all duration-300 transform
-                                ${!scriptsLoaded
-                                    ? 'bg-gray-800 text-gray-500 cursor-wait'
-                                    : 'bg-gradient-to-r from-blue-600 via-cyan-600 to-blue-600 text-white hover:scale-[1.02] hover:shadow-[0_0_30px_rgba(6,182,212,0.6)] active:scale-[0.98] bg-[length:200%_100%]'
-                                }
-                                flex items-center justify-center gap-2
-                            `}
-                            style={scriptsLoaded ? { animation: 'gradient 3s ease infinite' } : {}}
-                        >
-                            {!scriptsLoaded ? (
-                                <>
-                                    <div className="w-4 h-4 border-2 border-gray-500/30 border-t-gray-400 rounded-full animate-spin" />
-                                    Cargando...
-                                </>
-                            ) : (
-                                <>
-                                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                                    </svg>
-                                    CONECTAR GEE
-                                </>
-                            )}
-                            {/* Efecto de brillo animado */}
-                            {scriptsLoaded && (
-                                <div
-                                    className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
-                                    style={{
-                                        animation: 'shimmer 2s infinite', transform: 'translateX(-100%)'
-                                    }}
-                                />
-                            )}
-                        </button>
-                    ) : (
-                        <div className="w-full py-3 px-4 text-green-400 text-sm font-bold flex items-center justify-center gap-2 border border-green-500/30 rounded-xl bg-gradient-to-r from-green-900/20 to-emerald-900/20 shadow-[0_0_20px_rgba(16,185,129,0.3)]">
-                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                            </svg>
-                            CONECTADO
-                            <span className="absolute right-3 w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                    <div className="flex items-center justify-between">
+                        <div className={`flex items-center gap-2 text-sm font-bold ${cdseConfigured ? 'text-green-400' : 'text-amber-400'}`}>
+                            <span className={`w-2 h-2 rounded-full animate-pulse ${cdseConfigured ? 'bg-green-500' : 'bg-amber-500'}`} />
+                            {cdseConfigured ? 'CDSE ACTIVO' : 'CDSE NO CONFIGURADO'}
                         </div>
+                        <button
+                            onClick={() => setShowCredentials(v => !v)}
+                            className="text-[10px] text-gray-500 hover:text-white flex items-center gap-1 transition-colors"
+                        >
+                            <Settings className="w-3 h-3" />
+                            {showCredentials ? 'Ocultar' : 'Credenciales'}
+                        </button>
+                    </div>
+
+                    {showCredentials && (
+                        <form onSubmit={handleSetCredentials} className="flex flex-col gap-2.5 animate-in fade-in slide-in-from-top-2">
+                            <div>
+                                <label className="text-[9px] text-gray-400 uppercase font-semibold mb-1 block">Email Copernicus</label>
+                                <input
+                                    value={cdseUsername}
+                                    onChange={e => { setCdseUsername(e.target.value); setCdseError(null); setCdseSuccess(null); }}
+                                    type="email"
+                                    placeholder="usuario@ejemplo.com"
+                                    autoComplete="username"
+                                    className="w-full bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-blue-500/60 transition-colors"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-[9px] text-gray-400 uppercase font-semibold mb-1 block">Contraseña</label>
+                                <input
+                                    value={cdsePassword}
+                                    onChange={e => { setCdsePassword(e.target.value); setCdseError(null); setCdseSuccess(null); }}
+                                    type="password"
+                                    placeholder="••••••••••••••••"
+                                    autoComplete="current-password"
+                                    className="w-full bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-blue-500/60 transition-colors"
+                                />
+                            </div>
+
+                            {cdseError && (
+                                <div className="text-[9px] text-red-400 bg-red-500/10 border border-red-500/20 px-2.5 py-1.5 rounded flex items-start gap-1.5 leading-tight animate-in fade-in">
+                                    <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-red-400" />
+                                    <span>{cdseError}</span>
+                                </div>
+                            )}
+
+                            {cdseSuccess && (
+                                <div className="text-[9px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1.5 rounded flex items-start gap-1.5 leading-tight animate-in fade-in">
+                                    <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-emerald-400" />
+                                    <span>{cdseSuccess}</span>
+                                </div>
+                            )}
+
+                            <div className="flex gap-2 pt-1">
+                                <button
+                                    type="button"
+                                    onClick={handleVerifyAccess}
+                                    disabled={verifyingCreds || savingCreds || !cdseUsername || !cdsePassword}
+                                    className="flex-1 bg-gray-800 hover:bg-gray-700 border border-white/10 disabled:bg-gray-900/60 disabled:text-gray-600 text-[10px] py-2 rounded-lg font-bold transition-all text-gray-200 flex items-center justify-center gap-1.5"
+                                >
+                                    {verifyingCreds ? (
+                                        <><div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Verificando...</>
+                                    ) : (
+                                        <><ShieldCheck className="w-3.5 h-3.5 text-blue-400" /> Verificar Acceso</>
+                                    )}
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={savingCreds || verifyingCreds || !cdseUsername || !cdsePassword}
+                                    className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-[10px] py-2 rounded-lg font-bold transition-all text-white flex items-center justify-center gap-1.5 shadow-[0_0_15px_rgba(37,99,235,0.25)]"
+                                >
+                                    {savingCreds ? (
+                                        <><div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Conectando...</>
+                                    ) : (
+                                        'Conectar CDSE'
+                                    )}
+                                </button>
+                            </div>
+                            <p className="text-[8px] text-gray-500 leading-relaxed">
+                                Credenciales de tu cuenta de <span className="text-blue-400 underline">dataspace.copernicus.eu</span> para ingesta Sentinel-2.
+                            </p>
+                        </form>
                     )}
-                    <button onClick={() => setShowSettings(!showSettings)} className="text-[10px] text-gray-500 hover:text-white flex items-center gap-1">
-                        <Settings className="w-3 h-3" /> Configuración
-                    </button>
-                    {showSettings && (
-                        <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
-                            <input value={clientId} onChange={e => setClientId(e.target.value)} placeholder="Client ID" className="w-full bg-black border border-white/10 rounded px-2 py-1 text-[10px]" />
-                            <input value={projectId} onChange={e => setProjectId(e.target.value)} placeholder="Project ID" className="w-full bg-black border border-white/10 rounded px-2 py-1 text-[10px]" />
-                            <button onClick={saveSettings} className="bg-blue-600 text-[10px] px-2 py-1 rounded w-full">Guardar</button>
+                </GlassPanel>
+
+                {/* 2. AREA SOURCE TABS + SEARCH / FILE UPLOAD */}
+                <GlassPanel className="p-4 flex flex-col gap-3 overflow-visible">
+                    <div className="flex gap-1 bg-black/50 rounded-lg p-1">
+                        <button
+                            onClick={() => setAreaSource('wetland')}
+                            className={`flex-1 text-[9px] font-bold uppercase py-1.5 rounded-md transition-all ${areaSource === 'wetland' ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                        >Catálogo</button>
+                        <button
+                            onClick={() => setAreaSource('custom')}
+                            className={`flex-1 text-[9px] font-bold uppercase py-1.5 rounded-md transition-all ${areaSource === 'custom' ? 'bg-purple-600 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                        >Área Personalizada</button>
+                    </div>
+
+                    {areaSource === 'wetland' ? (
+                        <div className="relative">
+                            <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-500 pointer-events-none" />
+                            <input
+                                ref={searchInputRef}
+                                type="text"
+                                value={searchQuery}
+                                onChange={(e) => { setSearchQuery(e.target.value); updateDropdownRect(); }}
+                                onFocus={() => { updateDropdownRect(); if (filteredWetlands.length > 0) setShowSuggestions(true); }}
+                                onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                                placeholder="Buscar humedal..."
+                                className="w-full bg-gray-900 border border-white/10 rounded-xl py-2 pl-10 pr-4 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
+                            />
+                            {showSuggestions && filteredWetlands.length > 0 && dropdownRect && createPortal(
+                                <div
+                                    style={{
+                                        position: 'fixed',
+                                        top: dropdownRect.bottom + 4,
+                                        left: dropdownRect.left,
+                                        width: dropdownRect.width,
+                                        zIndex: 99999,
+                                    }}
+                                    className="bg-gray-950 border border-white/15 rounded-xl max-h-56 overflow-y-auto shadow-2xl"
+                                >
+                                    {filteredWetlands.map(w => (
+                                        <button
+                                            key={w.id}
+                                            onMouseDown={() => selectWetland(w)}
+                                            className="w-full text-left px-4 py-2 text-[10px] hover:bg-white/10 border-b border-white/5 text-gray-300 last:border-0"
+                                        >
+                                            {w.name}
+                                        </button>
+                                    ))}
+                                </div>,
+                                document.body
+                            )}
+                        </div>
+                    ) : (
+                        <div>
+                            <label
+                                htmlFor="area-file-input"
+                                className={`flex flex-col items-center justify-center gap-2 border-2 border-dashed rounded-xl p-4 cursor-pointer transition-all ${uploadingFile ? 'border-purple-500/50 bg-purple-500/5' :
+                                    customArea ? 'border-green-500/50 bg-green-500/5' :
+                                        'border-white/10 hover:border-purple-500/50 hover:bg-purple-500/5'
+                                    }`}
+                            >
+                                {uploadingFile ? (
+                                    <><div className="w-5 h-5 border-2 border-purple-500/30 border-t-purple-400 rounded-full animate-spin" />
+                                        <span className="text-[9px] text-purple-300">Procesando...</span></>
+                                ) : customArea ? (
+                                    <><svg className="w-5 h-5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                                        <span className="text-[9px] text-green-400 font-bold">{customAreaName || 'Área cargada'}</span>
+                                        <span className="text-[8px] text-gray-600">Clic para cambiar archivo</span></>
+                                ) : (
+                                    <><svg className="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
+                                        <span className="text-[9px] text-gray-400">Arrastra o selecciona tu área</span>
+                                        <span className="text-[8px] text-gray-600">SHP (.zip), GeoJSON, KML, KMZ</span></>
+                                )}
+                            </label>
+                            <input
+                                id="area-file-input"
+                                type="file"
+                                accept=".geojson,.json,.kml,.kmz,.zip"
+                                className="hidden"
+                                onChange={e => { if (e.target.files?.[0]) handleFileUpload(e.target.files[0]); }}
+                            />
+                            {fileError && <div className="mt-2 text-[9px] text-red-400 bg-red-400/10 border border-red-400/20 px-2 py-1 rounded">⚠️ {fileError}</div>}
                         </div>
                     )}
                 </GlassPanel>
 
-                {/* 2. SEARCH */}
-                <div className="relative z-50">
+                {/* OLD SEARCH (removed, now inside tab) */}
+                <div className="relative z-50 hidden">
                     <div className="relative">
                         <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-500" />
                         <input
@@ -706,223 +974,198 @@ export default function Dashboard() {
                     )}
                 </div>
 
-                {/* 3. UPLOAD CUSTOM AREA */}
-                <GlassPanel className="p-4 flex flex-col gap-2 border-dashed border-white/20 hover:border-blue-500/40 transition-colors">
-                    <label className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                            <Upload className="w-3 h-3 text-blue-400" /> Nuevo Humedal
-                        </div>
-                        {customGeometry && (
-                            <button
-                                onClick={() => { setCustomGeometry(null); setSearchQuery(''); }}
-                                className="text-red-400 hover:text-red-300 flex items-center gap-1 transition-colors"
-                            >
-                                <Trash2 className="w-2.5 h-2.5" /> Limpiar
-                            </button>
-                        )}
-                    </label>
-                    <p className="text-[9px] text-gray-500 leading-tight">Carga un archivo KML, KMZ o SHP (zip) para analizar un área personalizada.</p>
-
-                    <div className="relative mt-1">
-                        <input
-                            type="file"
-                            accept=".kml,.kmz,.zip"
-                            onChange={handleFileUpload}
-                            disabled={uploadingFile}
-                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-wait"
-                        />
-                        <div className={`
-                            w-full py-2.5 px-4 rounded-xl border border-white/10 bg-white/5 
-                            flex items-center justify-center gap-2 text-[10px] font-bold tracking-tight
-                            ${uploadingFile ? 'text-blue-400 animate-pulse' : 'text-gray-300'}
-                        `}>
-                            {uploadingFile ? (
-                                <>
-                                    <div className="w-3 h-3 border-2 border-blue-400/30 border-t-blue-400 rounded-full animate-spin" />
-                                    PROCESANDO...
-                                </>
-                            ) : (
-                                <>
-                                    <Upload className="w-3.5 h-3.5" />
-                                    {customGeometry ? 'ARCHIVO CARGADO' : 'SUBIR ARCHIVO'}
-                                </>
-                            )}
-                        </div>
-                    </div>
-                </GlassPanel>
-
                 {/* 2.5 WETLAND PROFILE */}
-                {
-                    selectedWetland && (
-                        <GlassPanel className="p-4 flex flex-col gap-2 animate-in fade-in zoom-in duration-300">
-                            <label className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center gap-2">
-                                <Maximize2 className="w-3 h-3" /> Perfil del Humedal
-                            </label>
-                            <div className="grid grid-cols-2 gap-2 mt-1">
-                                <div className="bg-white/5 p-2 rounded-lg">
-                                    <div className="text-[9px] text-gray-500 uppercase">Región</div>
-                                    <div className="text-[10px] font-medium text-white truncate" title={selectedWetland.region}>
-                                        {selectedWetland.region.replace('Región del ', '').replace('Región de ', '')}
-                                    </div>
-                                </div>
-                                <div className="bg-white/5 p-2 rounded-lg">
-                                    <div className="text-[9px] text-gray-500 uppercase">Código</div>
-                                    <div className="text-[10px] font-medium text-white">{selectedWetland.code || 'N/A'}</div>
+                {selectedWetland && (
+                    <GlassPanel className="p-4 flex flex-col gap-2 animate-in fade-in zoom-in duration-300">
+                        <label className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center gap-2">
+                            <Maximize2 className="w-3 h-3" /> Perfil del Humedal
+                        </label>
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                            <div className="bg-white/5 p-2 rounded-lg">
+                                <div className="text-[9px] text-gray-500 uppercase">Región</div>
+                                <div className="text-[10px] font-medium text-white truncate" title={selectedWetland.region}>
+                                    {selectedWetland.region.replace('Región del ', '').replace('Región de ', '')}
                                 </div>
                             </div>
-                            <div className="bg-white/5 p-2 rounded-lg mt-1">
-                                <div className="text-[9px] text-gray-500 uppercase">Coordenadas (Centro)</div>
-                                <div className="text-[10px] font-mono text-blue-300">
-                                    {((selectedWetland.bbox[1] + selectedWetland.bbox[3]) / 2).toFixed(4)},
-                                    {((selectedWetland.bbox[0] + selectedWetland.bbox[2]) / 2).toFixed(4)}
-                                </div>
+                            <div className="bg-white/5 p-2 rounded-lg">
+                                <div className="text-[9px] text-gray-500 uppercase">Código</div>
+                                <div className="text-[10px] font-medium text-white">{selectedWetland.code || 'N/A'}</div>
                             </div>
-                        </GlassPanel>
-                    )
-                }
+                        </div>
+                        <div className="bg-white/5 p-2 rounded-lg mt-1">
+                            <div className="text-[9px] text-gray-500 uppercase">Coordenadas (Centro)</div>
+                            <div className="text-[10px] font-mono text-blue-300">
+                                {((selectedWetland.bbox[1] + selectedWetland.bbox[3]) / 2).toFixed(4)},
+                                {((selectedWetland.bbox[0] + selectedWetland.bbox[2]) / 2).toFixed(4)}
+                            </div>
+                        </div>
+                    </GlassPanel>
+                )}
 
                 {/* 2.6 NETWORK STATUS (Show when no wetland selected) */}
-                {
-                    !selectedWetland && (
-                        <GlassPanel className="p-4 flex flex-col gap-2 animate-in fade-in duration-500 delay-150 relative overflow-hidden group">
-                            <div className="absolute top-0 right-0 p-2 opacity-50">
-                                <Activity className="w-12 h-12 text-blue-500/10" />
-                            </div>
-                            <label className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center gap-2">
-                                <Wind className="w-3 h-3 text-blue-400" /> Estado de la Red
-                            </label>
+                {!selectedWetland && (
+                    <GlassPanel className="p-4 flex flex-col gap-2 animate-in fade-in duration-500 delay-150 relative overflow-hidden group">
+                        <div className="absolute top-0 right-0 p-2 opacity-50">
+                            <Activity className="w-12 h-12 text-blue-500/10" />
+                        </div>
+                        <label className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center gap-2">
+                            <Wind className="w-3 h-3 text-blue-400" /> Estado de la Red
+                        </label>
 
-                            <div className="flex items-end gap-2 mt-2">
-                                <div className="text-3xl font-mono font-bold text-white leading-none">
-                                    {wetlands.length > 0 ? wetlands.length : '---'}
-                                </div>
-                                <div className="text-[10px] text-gray-500 mb-1 font-medium">Humedales Monitoreados</div>
+                        <div className="flex items-end gap-2 mt-2">
+                            <div className="text-3xl font-mono font-bold text-white leading-none">
+                                {wetlands.length > 0 ? wetlands.length : '---'}
                             </div>
+                            <div className="text-[10px] text-gray-500 mb-1 font-medium">Humedales Monitoreados</div>
+                        </div>
 
-                            <div className="h-px bg-white/10 my-1" />
+                        <div className="h-px bg-white/10 my-1" />
 
-                            <div className="space-y-2">
-                                <div className="flex items-center justify-between text-[10px]">
-                                    <span className="text-gray-400">Sentinel-2 L2A</span>
-                                    <span className="text-green-400 font-mono bg-green-900/30 px-1.5 py-0.5 rounded flex items-center gap-1">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" /> ONLINE
-                                    </span>
-                                </div>
-                                <div className="flex items-center justify-between text-[10px]">
-                                    <span className="text-gray-400">Sentinel-1 SAR</span>
-                                    <span className="text-green-400 font-mono bg-green-900/30 px-1.5 py-0.5 rounded flex items-center gap-1">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" /> ONLINE
-                                    </span>
-                                </div>
-                                <div className="flex items-center justify-between text-[10px]">
-                                    <span className="text-gray-400">Resolución Espacial</span>
-                                    <span className="text-blue-300 font-mono">10-20m</span>
-                                </div>
-                                <div className="flex items-center justify-between text-[10px]">
-                                    <span className="text-gray-400">Actualización</span>
-                                    <span className="text-blue-300 font-mono">5 días</span>
-                                </div>
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between text-[10px]">
+                                <span className="text-gray-400">Sentinel-2 L2A</span>
+                                <span className="text-green-400 font-mono bg-green-900/30 px-1.5 py-0.5 rounded flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" /> ONLINE
+                                </span>
                             </div>
-                        </GlassPanel>
-                    )
-                }
+                            <div className="flex items-center justify-between text-[10px]">
+                                <span className="text-gray-400">Sentinel-1 SAR</span>
+                                <span className="text-green-400 font-mono bg-green-900/30 px-1.5 py-0.5 rounded flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" /> ONLINE
+                                </span>
+                            </div>
+                            <div className="flex items-center justify-between text-[10px]">
+                                <span className="text-gray-400">Resolución Espacial</span>
+                                <span className="text-blue-300 font-mono">10-20m</span>
+                            </div>
+                            <div className="flex items-center justify-between text-[10px]">
+                                <span className="text-gray-400">Actualización</span>
+                                <span className="text-blue-300 font-mono">5 días</span>
+                            </div>
+                        </div>
+                    </GlassPanel>
+                )}
 
                 {/* 2.7 TEMPORAL COVERAGE (Show when results available) */}
-                {
-                    results && results['Hydrology']?.coverage && (
-                        <GlassPanel className="p-4 flex flex-col gap-2">
-                            <label className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center gap-2">
-                                <Calendar className="w-3 h-3 text-green-400" /> Cobertura Temporal
-                            </label>
+                {results && results['Hydrology']?.coverage && (
+                    <GlassPanel className="p-4 flex flex-col gap-2">
+                        <label className="text-[10px] text-gray-400 font-bold uppercase tracking-wider flex items-center gap-2">
+                            <Calendar className="w-3 h-3 text-green-400" /> Cobertura Temporal
+                        </label>
 
-                            <div className="grid grid-cols-2 gap-2">
-                                <div className="bg-white/5 p-2 rounded-lg">
-                                    <div className="text-[9px] text-gray-500 uppercase">Días de Datos</div>
-                                    <div className="text-sm font-mono font-bold text-green-400">
-                                        {results['Hydrology']?.coverage?.coverage_days || 'N/A'}
-                                    </div>
-                                </div>
-                                <div className="bg-white/5 p-2 rounded-lg">
-                                    <div className="text-[9px] text-gray-500 uppercase">Puntos Válidos</div>
-                                    <div className="text-sm font-mono font-bold text-blue-400">
-                                        {results['Hydrology']?.stats?.data_count || 'N/A'}
-                                    </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            <div className="bg-white/5 p-2 rounded-lg">
+                                <div className="text-[9px] text-gray-500 uppercase">Días de Datos</div>
+                                <div className="text-sm font-mono font-bold text-green-400">
+                                    {results['Hydrology'].coverage.coverage_days || 'N/A'}
                                 </div>
                             </div>
-
-                            <div className="bg-white/5 p-2 rounded-lg mt-1">
-                                <div className="text-[9px] text-gray-500 uppercase">Período</div>
-                                <div className="text-[9px] font-mono text-gray-300">
-                                    {results['Hydrology']?.coverage?.start_date || 'N/A'} → {results['Hydrology']?.coverage?.end_date || 'N/A'}
+                            <div className="bg-white/5 p-2 rounded-lg">
+                                <div className="text-[9px] text-gray-500 uppercase">Puntos Válidos</div>
+                                <div className="text-sm font-mono font-bold text-blue-400">
+                                    {results['Hydrology'].stats.data_count || 'N/A'}
                                 </div>
                             </div>
+                        </div>
 
-                            {/* Quality indicator */}
-                            {(() => {
-                                const cv = results['Hydrology']?.stats?.cv || 0;
-                                const outliers = results['Hydrology']?.stats?.outlier_count || 0;
-                                let quality = '';
-                                let color = '';
+                        <div className="bg-white/5 p-2 rounded-lg mt-1">
+                            <div className="text-[9px] text-gray-500 uppercase">Período</div>
+                            <div className="text-[9px] font-mono text-gray-300">
+                                {results['Hydrology'].coverage.start_date} → {results['Hydrology'].coverage.end_date}
+                            </div>
+                        </div>
 
-                                if (cv < 20 && outliers === 0) {
-                                    quality = 'Excelente';
-                                    color = 'text-green-400';
-                                } else if (cv < 40 && outliers < 5) {
-                                    quality = 'Buena';
-                                    color = 'text-yellow-400';
-                                } else {
-                                    quality = 'Regular';
-                                    color = 'text-red-400';
-                                }
+                        {/* Quality indicator */}
+                        {(() => {
+                            const cv = results['Hydrology'].stats.cv || 0;
+                            const outliers = results['Hydrology'].stats.outlier_count || 0;
+                            let quality = '';
+                            let color = '';
 
-                                return (
-                                    <div className="flex items-center justify-between mt-1 p-2 bg-white/5 rounded-lg">
-                                        <span className="text-[9px] text-gray-500 uppercase">Calidad</span>
-                                        <span className={`text-[10px] font-mono font-bold ${color}`}>● {quality}</span>
-                                    </div>
-                                );
-                            })()}
-                        </GlassPanel>
-                    )
-                }
+                            if (cv < 20 && outliers === 0) {
+                                quality = 'Excelente';
+                                color = 'text-green-400';
+                            } else if (cv < 40 && outliers < 5) {
+                                quality = 'Buena';
+                                color = 'text-yellow-400';
+                            } else {
+                                quality = 'Regular';
+                                color = 'text-red-400';
+                            }
+
+                            return (
+                                <div className="flex items-center justify-between mt-1 p-2 bg-white/5 rounded-lg">
+                                    <span className="text-[9px] text-gray-500 uppercase">Calidad</span>
+                                    <span className={`text-[10px] font-mono font-bold ${color}`}>● {quality}</span>
+                                </div>
+                            );
+                        })()}
+                    </GlassPanel>
+                )}
 
                 {/* 3. CONTROL PANEL */}
                 <GlassPanel id="control-panel" className="p-4 flex flex-col gap-3 mt-auto">
                     <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Control de Misión</label>
                     <div className="grid grid-cols-2 gap-2">
                         <div className="space-y-1">
-                            <label className="text-[10px] text-gray-500">Inicio</label>
-                            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full bg-black border border-white/10 rounded px-2 py-1 text-[10px]" />
+                            <label className="text-[10px] text-gray-400 font-medium">Inicio</label>
+                            <input
+                                type="date"
+                                min="2015-07-01"
+                                value={startDate}
+                                onChange={e => setStartDate(e.target.value)}
+                                className="w-full bg-black border border-white/10 rounded px-2 py-1 text-[10px] text-gray-200 focus:border-blue-500/50 outline-none"
+                            />
                         </div>
                         <div className="space-y-1">
-                            <label className="text-[10px] text-gray-500">Fin</label>
-                            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="w-full bg-black border border-white/10 rounded px-2 py-1 text-[10px]" />
+                            <label className="text-[10px] text-gray-400 font-medium">Fin</label>
+                            <input
+                                type="date"
+                                min="2015-07-01"
+                                value={endDate}
+                                onChange={e => setEndDate(e.target.value)}
+                                className="w-full bg-black border border-white/10 rounded px-2 py-1 text-[10px] text-gray-200 focus:border-blue-500/50 outline-none"
+                            />
                         </div>
+                    </div>
+                    <div className="text-[8px] text-gray-500 -mt-1.5 text-center font-mono">
+                        Sentinel-2 MSI disponible desde julio 2015
                     </div>
 
                     <button
+                        type="button"
                         onClick={handleAnalyze}
-                        disabled={loading || !accessToken || !selectedWetland}
+                        disabled={loading || generatingReport || !selectedWetland}
                         className={`w-full py-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all
-                            ${loading || !accessToken || !selectedWetland ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]'}`}
-                        title={!selectedWetland ? 'Selecciona un humedal o sube un archivo primero' : !accessToken ? 'Conéctate a GEE primero' : ''}
+                            ${loading || !selectedWetland ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]'}`}
+                        title={!selectedWetland ? 'Selecciona un humedal primero' : ''}
                     >
-                        {loading ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Layers className="w-4 h-4" />}
-                        EJECUTAR TODO
+                        {loading ? (
+                            <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> PROCESANDO ANÁLISIS...</>
+                        ) : (
+                            <><Layers className="w-4 h-4" /> EJECUTAR TODO</>
+                        )}
                     </button>
 
                     {/* DOWNLOAD REPORT BUTTON */}
                     <button
+                        type="button"
                         onClick={handleDownloadReport}
-                        disabled={!results || !selectedWetland}
-                        className={`w-full py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all
-                            ${!results || !selectedWetland ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'}`}
+                        disabled={generatingReport || loading || !results || !selectedWetland}
+                        className={`w-full py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all
+                            ${generatingReport || !results || !selectedWetland ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'}`}
                         title={!results ? 'Ejecuta un análisis primero' : 'Descargar reporte Word'}
                     >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
-                        DESCARGAR REPORTE
+                        {generatingReport ? (
+                            <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> GENERANDO REPORTE...</>
+                        ) : (
+                            <>
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                </svg>
+                                DESCARGAR REPORTE
+                            </>
+                        )}
                     </button>
 
                     <div className="bg-black/50 p-3 rounded border border-white/5 font-mono text-[9px] h-28 overflow-y-auto flex flex-col-reverse custom-scrollbar">
@@ -945,35 +1188,104 @@ export default function Dashboard() {
             </aside>
 
             {/* MAIN DASHBOARD */}
-            <main className="flex-1 h-auto md:h-screen overflow-y-auto md:overflow-hidden flex flex-col relative bg-gradient-to-br from-gray-900 to-black p-4 gap-4">
+            <main className="flex-1 h-screen overflow-hidden flex flex-col relative bg-gradient-to-br from-gray-900 to-black p-3 gap-3">
 
-                {/* TOP GRID: 6 MAP CARDS */}
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 md:h-[70%]">
-                    {
-                        [
-                            { id: 'Hydrology', title: 'HIDROLOGÍA', acronym: 'MNDWI', icon: Droplets, color: 'text-blue-400', border: 'border-blue-500/20' },
-                            { id: 'Vegetation', title: 'VEGETACIÓN', acronym: 'NDRE', icon: Activity, color: 'text-green-400', border: 'border-green-500/20' },
-                            { id: 'WaterQuality', title: 'CALIDAD AGUA', acronym: 'NDCI', icon: AlertCircle, color: 'text-yellow-400', border: 'border-yellow-500/20' },
-                            { id: 'SoilVegetation', title: 'VEG./SUELO', acronym: 'SAVI', icon: Layers, color: 'text-lime-400', border: 'border-lime-500/20' },
-                            { id: 'AlgaeBloom', title: 'ALGAS', acronym: 'FAI', icon: Wind, color: 'text-cyan-400', border: 'border-cyan-500/20' },
-                            { id: 'WaterRatio', title: 'RATIO AGUA', acronym: 'WRI', icon: Droplets, color: 'text-purple-400', border: 'border-purple-500/20' }
-                        ].map(mode => (
-                            <IndexCard
-                                key={mode.id}
-                                mode={mode}
-                                res={results?.[mode.id]}
-                                legend={LEGENDS[mode.id]}
-                                viewState={viewState}
-                                onMove={evt => setViewState(evt.viewState)}
-                                viewYear={viewYear}
-                                selectedWetland={selectedWetland}
-                            />
-                        ))
-                    }
+                {/* TOP CONTROL BAR: Wetland info, Full Extent button, Period Switcher */}
+                <div className="flex items-center justify-between bg-black/50 backdrop-blur-xl border border-white/10 px-3.5 py-1.5 rounded-xl shrink-0 shadow-lg">
+                    <div className="flex items-center gap-3">
+                        <span className="text-[10px] font-bold tracking-wider text-gray-400 uppercase">Humedal Activo:</span>
+                        <span className="text-xs font-semibold text-white bg-blue-500/15 border border-blue-500/30 px-2.5 py-0.5 rounded-lg flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                            {selectedWetland ? selectedWetland.name : customArea ? (customAreaName || 'Área Personalizada') : 'Ninguno seleccionado'}
+                        </span>
+                        {/* CONTROLES ZOOM MANUAL */}
+                        <div className="flex items-center bg-black/60 border border-white/10 rounded-lg p-0.5" title="Ajuste fino de acercamiento">
+                            <button
+                                onClick={() => setViewState(prev => ({ ...prev, zoom: Math.max(3, Math.min(18, Number((prev.zoom - 0.5).toFixed(1)))) }))}
+                                className="w-5 h-5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 rounded font-bold text-xs transition-all"
+                                title="Alejar (-0.5)"
+                            >
+                                −
+                            </button>
+                            <span className="px-1.5 text-[10px] font-mono text-gray-300 min-w-[2.6rem] text-center">
+                                {viewState.zoom.toFixed(1)}z
+                            </span>
+                            <button
+                                onClick={() => setViewState(prev => ({ ...prev, zoom: Math.max(3, Math.min(18, Number((prev.zoom + 0.5).toFixed(1)))) }))}
+                                className="w-5 h-5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 rounded font-bold text-xs transition-all"
+                                title="Acercar (+0.5)"
+                            >
+                                +
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-2.5">
+                        {/* BOTÓN VISIÓN TOTAL (RE-CENTRAR Y FIT AL HUMEDAL) */}
+                        <button
+                            onClick={fitToWetland}
+                            disabled={!selectedWetland && !customArea}
+                            className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all shadow-sm ${
+                                selectedWetland || customArea
+                                    ? 'bg-emerald-600/25 hover:bg-emerald-600/35 text-emerald-300 border border-emerald-500/40 hover:border-emerald-500/60 cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.2)]'
+                                    : 'bg-white/5 text-gray-500 border border-white/5 cursor-not-allowed'
+                            }`}
+                            title="Ajustar zoom al acercamiento total que permite la visión completa del humedal"
+                        >
+                            <Maximize2 className="w-3.5 h-3.5" />
+                            <span>Visión Total</span>
+                        </button>
+
+                        {/* SELECTOR PERÍODO COMPARATIVO (START / END YEAR) */}
+                        <div className="flex items-center bg-black/70 border border-white/10 rounded-lg p-0.5 text-xs">
+                            <button
+                                onClick={() => setViewYear('start')}
+                                className={`px-2.5 py-0.5 rounded-md transition-all text-[11px] ${
+                                    viewYear === 'start'
+                                        ? 'bg-blue-600 text-white font-semibold shadow-[0_0_10px_rgba(37,99,235,0.4)]'
+                                        : 'text-gray-400 hover:text-white'
+                                }`}
+                            >
+                                Inicial ({startDate.substring(0, 4)})
+                            </button>
+                            <button
+                                onClick={() => setViewYear('end')}
+                                className={`px-2.5 py-0.5 rounded-md transition-all text-[11px] ${
+                                    viewYear === 'end'
+                                        ? 'bg-blue-600 text-white font-semibold shadow-[0_0_10px_rgba(37,99,235,0.4)]'
+                                        : 'text-gray-400 hover:text-white'
+                                }`}
+                            >
+                                Final ({endDate.substring(0, 4)})
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
-                {/* BOTTOM CHART - Reduced to 25% */}
-                <div className="h-[25%] bg-black/40 border border-white/10 rounded-2xl p-3 flex flex-col min-h-0">
+                {/* TOP GRID: 6 MAP CARDS (2 rows x 3 cols) */}
+                <div className="grid grid-cols-3 gap-3 flex-1 min-h-0">
+                    {[
+                        { id: 'Hydrology', title: 'HIDROLOGÍA', acronym: 'MNDWI', icon: Droplets, color: 'text-blue-400', border: 'border-blue-500/20' },
+                        { id: 'Vegetation', title: 'VEGETACIÓN', acronym: 'NDRE', icon: Activity, color: 'text-green-400', border: 'border-green-500/20' },
+                        { id: 'WaterQuality', title: 'CALIDAD AGUA', acronym: 'NDCI', icon: AlertCircle, color: 'text-yellow-400', border: 'border-yellow-500/20' },
+                        { id: 'SoilVegetation', title: 'VEG./SUELO', acronym: 'SAVI', icon: Layers, color: 'text-lime-400', border: 'border-lime-500/20' },
+                        { id: 'AlgaeBloom', title: 'ALGAS', acronym: 'FAI', icon: Wind, color: 'text-cyan-400', border: 'border-cyan-500/20' },
+                        { id: 'WaterRatio', title: 'RATIO AGUA', acronym: 'WRI', icon: Droplets, color: 'text-purple-400', border: 'border-purple-500/20' }
+                    ].map(mode => (
+                        <IndexCard
+                            key={mode.id}
+                            mode={mode}
+                            res={results?.[mode.id]}
+                            legend={LEGENDS[mode.id]}
+                            viewState={viewState}
+                            onMove={evt => setViewState(evt.viewState)}
+                            viewYear={viewYear}
+                        />
+                    ))}
+                </div>
+
+                {/* BOTTOM CHART */}
+                <div className="h-[25%] shrink-0 bg-black/40 border border-white/10 rounded-2xl p-3 flex flex-col min-h-0">
                     <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-2">
                             <Activity className="w-4 h-4 text-purple-400" />
@@ -994,8 +1306,31 @@ export default function Dashboard() {
                             <AreaChart data={mergedData}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" vertical={false} />
                                 <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#666' }} />
-                                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#666' }} domain={['auto', 'auto']} />
-                                <Tooltip contentStyle={{ backgroundColor: '#000', border: '1px solid #333', borderRadius: '8px' }} />
+                                <YAxis
+                                    axisLine={false}
+                                    tickLine={false}
+                                    tick={{ fontSize: 10, fill: '#666' }}
+                                    domain={['auto', 'auto']}
+                                    tickFormatter={(val: any) => typeof val === 'number' ? val.toFixed(3) : val}
+                                />
+                                <Tooltip
+                                    contentStyle={{
+                                        backgroundColor: '#0a0f1d',
+                                        border: '1px solid rgba(255,255,255,0.15)',
+                                        borderRadius: '8px',
+                                        fontSize: '11px',
+                                        padding: '8px 12px',
+                                        boxShadow: '0 8px 24px rgba(0,0,0,0.6)'
+                                    }}
+                                    itemStyle={{ padding: '2px 0' }}
+                                    formatter={(value: any, name: string) => {
+                                        if (typeof value === 'number') {
+                                            return [value.toFixed(3), METRIC_NAMES[name] || name];
+                                        }
+                                        return [value, METRIC_NAMES[name] || name];
+                                    }}
+                                    labelFormatter={(label) => `Período: ${label}`}
+                                />
 
                                 {/* DATA LINES */}
                                 <Area type="monotone" dataKey="Hydrology" stroke="#3b82f6" fillOpacity={0.1} fill="#3b82f6" strokeWidth={2} connectNulls />

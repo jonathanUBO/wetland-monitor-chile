@@ -11,7 +11,10 @@ Thumbs.db
 *$py.class
 backend/venv/
 backend/.env
+backend/.env*
 backend/logs/
+*_storage.json
+_cdse_storage.json
 
 # Node Frontend
 frontend/node_modules/
@@ -21,6 +24,10 @@ frontend/build/
 frontend/.env
 frontend/.env.local
 frontend/npm-debug.log*
+
+# Docker & Infrastructure
+nginx/certs/
+docker-compose.override.yml
 
 # Google Earth Engine
 gee-key.json

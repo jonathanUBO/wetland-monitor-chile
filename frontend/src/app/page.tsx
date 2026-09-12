@@ -16,7 +16,10 @@ import {
     Settings,
     Maximize2,
     ShieldCheck,
-    CheckCircle2
+    CheckCircle2,
+    LogOut,
+    Key,
+    User
 } from 'lucide-react';
 import {
     XAxis,
@@ -79,8 +82,13 @@ interface ModeResult {
         current_std?: number;
         current_min?: number;
         current_max?: number;
+        initial?: number;
+        initial_mean?: number;
+        initial_std?: number;
         last: number;
         trend: number;
+        trend_delta?: number;
+        sen_slope?: number;
         outlier_count?: number;
         data_count?: number;
         cv?: number;  // Coefficient of variation
@@ -427,15 +435,26 @@ const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeo
 
                 <div className="flex items-baseline gap-2.5 mt-0.5">
                     <span className="text-2xl font-mono font-bold text-white drop-shadow-md">
-                        {res?.stats?.current != null ? res.stats.current.toFixed(3) : '---'}
+                        {viewYear === 'start'
+                            ? (res?.stats?.initial != null ? res.stats.initial.toFixed(3) : (res?.stats?.current != null ? res.stats.current.toFixed(3) : '---'))
+                            : (res?.stats?.current != null ? res.stats.current.toFixed(3) : '---')}
                     </span>
 
                     {/* Robust Statistics Inline */}
                     {res?.stats && (
                         <div className="flex items-center gap-2 text-[10px] text-gray-400 font-mono">
-                            {res.stats.current_std != null && (
-                                <span><span className="text-gray-500">σ:</span> ±{res.stats.current_std.toFixed(3)}</span>
+                            {viewYear === 'start' ? (
+                                (res.stats.initial_std != null || res.stats.current_std != null) && (
+                                    <span><span className="text-gray-500">σ:</span> ±{(res.stats.initial_std ?? res.stats.current_std)?.toFixed(3)}</span>
+                                )
+                            ) : (
+                                res.stats.current_std != null && (
+                                    <span><span className="text-gray-500">σ:</span> ±{res.stats.current_std.toFixed(3)}</span>
+                                )
                             )}
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-gray-400 uppercase font-semibold">
+                                {viewYear === 'start' ? 'Inicial' : 'Final'}
+                            </span>
                             {res.stats.cv != null && (
                                 <span><span className="text-gray-500">CV:</span> {res.stats.cv.toFixed(1)}%</span>
                             )}
@@ -626,7 +645,8 @@ export default function Dashboard() {
     const [selectedWetland, setSelectedWetland] = useState<any | null>(null);
     const [showSuggestions, setShowSuggestions] = useState(false);
 
-    // CDSE Credentials
+    // CDSE Credentials - Supports Any Account (Email/Password or OAuth2 Client ID/Secret)
+    const [cdseAuthMode, setCdseAuthMode] = useState<'password' | 'oauth'>('password');
     const [cdseUsername, setCdseUsername] = useState(() => {
         if (typeof window !== 'undefined') {
             try {
@@ -645,7 +665,26 @@ export default function Dashboard() {
         }
         return '';
     });
+    const [cdseClientId, setCdseClientId] = useState(() => {
+        if (typeof window !== 'undefined') {
+            try {
+                const saved = localStorage.getItem('cdse_credentials');
+                if (saved) return JSON.parse(saved).clientId || '';
+            } catch {}
+        }
+        return '';
+    });
+    const [cdseClientSecret, setCdseClientSecret] = useState(() => {
+        if (typeof window !== 'undefined') {
+            try {
+                const saved = localStorage.getItem('cdse_credentials');
+                if (saved) return JSON.parse(saved).clientSecret || '';
+            } catch {}
+        }
+        return '';
+    });
     const [cdseConfigured, setCdseConfigured] = useState(false);
+    const [isInstitutionalServer, setIsInstitutionalServer] = useState(false);
     const [cdseError, setCdseError] = useState<string | null>(null);
     const [cdseSuccess, setCdseSuccess] = useState<string | null>(null);
     const [showCredentials, setShowCredentials] = useState(false);
@@ -676,84 +715,113 @@ export default function Dashboard() {
             .then(setWetlands)
             .catch(console.error);
 
-        // Check CDSE credentials status with auto-restore
+        // Check CDSE credentials status (Dual Mode: Institutional vs BYOC)
         const API = getApiUrl();
         axios.get(`${API}/credentials-status`)
             .then(async r => {
-                if (r.data.configured) {
+                if (r.data.server_configured) {
                     setCdseConfigured(true);
+                    setIsInstitutionalServer(true);
+                    setProcessLog(prev => [...prev, '✓  Servidor en Modo Institucional (Credenciales activas)']);
+                } else if (r.data.has_active_session) {
+                    setCdseConfigured(true);
+                    setIsInstitutionalServer(false);
+                    setProcessLog(prev => [...prev, '✓  Sesión de usuario activa en el servidor']);
                 } else {
-                    // Try auto-restoring credentials from localStorage
-                    let restored = false;
-                    try {
-                        const saved = localStorage.getItem('cdse_credentials');
-                        if (saved) {
-                            const parsed = JSON.parse(saved);
-                            if (parsed.username && parsed.password) {
-                                const authRes = await axios.post(`${API}/set-credentials`, {
-                                    username: parsed.username,
-                                    password: parsed.password
-                                });
-                                if (authRes.data?.status === 'ok') {
-                                    setCdseConfigured(true);
-                                    restored = true;
-                                    setProcessLog(prev => [...prev, '✓  Credenciales CDSE sincronizadas con el servidor']);
-                                }
-                            }
+                    setIsInstitutionalServer(false);
+                }
+
+                // Try auto-restoring credentials from localStorage
+                try {
+                    const saved = localStorage.getItem('cdse_credentials');
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        if (parsed.authMode) setCdseAuthMode(parsed.authMode);
+                        if (parsed.username) setCdseUsername(parsed.username);
+                        if (parsed.password) setCdsePassword(parsed.password);
+                        if (parsed.clientId) setCdseClientId(parsed.clientId);
+                        if (parsed.clientSecret) setCdseClientSecret(parsed.clientSecret);
+                        const hasUserCreds = (parsed.username && parsed.password) || (parsed.clientId && parsed.clientSecret);
+                        if (hasUserCreds) {
+                            setCdseConfigured(true);
+                            setProcessLog(prev => [...prev, '✓  Credenciales CDSE recuperadas desde almacenamiento local']);
                         }
-                    } catch {
-                        // ignore auto-restore error
                     }
-                    if (!restored) {
-                        setCdseConfigured(false);
-                        setShowCredentials(true);
-                    }
+                } catch {
+                    // ignore auto-restore error
                 }
             })
             .catch(() => {
-                setCdseConfigured(false);
-                setShowCredentials(true);
+                // Fallback to local storage credentials if backend is offline/sleeping
+                try {
+                    const saved = localStorage.getItem('cdse_credentials');
+                    if (saved) {
+                        const parsed = JSON.parse(saved);
+                        if (parsed.authMode) setCdseAuthMode(parsed.authMode);
+                        if (parsed.username) setCdseUsername(parsed.username);
+                        if (parsed.password) setCdsePassword(parsed.password);
+                        if (parsed.clientId) setCdseClientId(parsed.clientId);
+                        if (parsed.clientSecret) setCdseClientSecret(parsed.clientSecret);
+                        const hasUserCreds = (parsed.username && parsed.password) || (parsed.clientId && parsed.clientSecret);
+                        if (hasUserCreds) {
+                            setCdseConfigured(true);
+                        }
+                    }
+                } catch {}
             });
+    }, []);
+
+    // Helper to normalize region names from dataset if encoding characters are present
+    const getCleanRegion = useCallback((r: string) => {
+        if (!r) return 'Chile';
+        if (r.includes('Araucan')) return 'La Araucanía';
+        if (r.includes('Biob')) return 'Biobío';
+        if (r.includes('R') && r.includes('os')) return 'Los Ríos';
+        if (r.includes('Ays')) return 'Aysén';
+        if (r.includes('Tarapac')) return 'Tarapacá';
+        if (r.includes('Valpara')) return 'Valparaíso';
+        if (r.includes('uble') || r.includes('Ñuble')) return 'Ñuble';
+        return r;
     }, []);
 
     // Memoize counts per region
     const regionCounts = React.useMemo(() => {
         const counts: Record<string, number> = {};
         wetlands.forEach(w => {
-            const r = w.region || 'Chile';
+            const r = getCleanRegion(w.region);
             counts[r] = (counts[r] || 0) + 1;
         });
         return counts;
-    }, [wetlands]);
+    }, [wetlands, getCleanRegion]);
 
     // Filter wetlands by search and region
     useEffect(() => {
         let results = wetlands;
         if (selectedRegion) {
-            results = results.filter(w => w.region === selectedRegion);
+            results = results.filter(w => getCleanRegion(w.region) === selectedRegion);
         }
         if (searchQuery.trim().length > 0) {
             const query = searchQuery.toLowerCase().trim();
             results = results.filter(w =>
                 w.name.toLowerCase().includes(query) ||
                 (w.code && String(w.code).toLowerCase().includes(query)) ||
-                (w.region && w.region.toLowerCase().includes(query))
+                (w.region && getCleanRegion(w.region).toLowerCase().includes(query))
             );
         }
         // Limit results to 150 items for smooth DOM rendering
         setFilteredWetlands(results.slice(0, 150));
-    }, [searchQuery, selectedRegion, wetlands]);
+    }, [searchQuery, selectedRegion, wetlands, getCleanRegion]);
 
     // Group filtered results by Chilean region
     const groupedWetlands = React.useMemo(() => {
         const groups: Record<string, any[]> = {};
         filteredWetlands.forEach(w => {
-            const reg = w.region || 'Chile';
+            const reg = getCleanRegion(w.region);
             if (!groups[reg]) groups[reg] = [];
             groups[reg].push(w);
         });
         return groups;
-    }, [filteredWetlands]);
+    }, [filteredWetlands, getCleanRegion]);
 
     // --- ACTIONS ---
     const selectWetland = (wetland: any) => {
@@ -778,9 +846,34 @@ export default function Dashboard() {
 
     const handleLogin = () => { };
 
+    const handleDisconnect = async () => {
+        try {
+            localStorage.removeItem('cdse_credentials');
+            const API = getApiUrl();
+            await axios.post(`${API}/clear-credentials`).catch(() => {});
+        } catch {}
+        setCdseUsername('');
+        setCdsePassword('');
+        setCdseClientId('');
+        setCdseClientSecret('');
+        if (!isInstitutionalServer) {
+            setCdseConfigured(false);
+        }
+        setCdseSuccess('Cuenta desconectada exitosamente. Puedes ingresar cualquier otra cuenta.');
+        setCdseError(null);
+        setProcessLog(prev => [...prev, 'ℹ  Sesión de credenciales CDSE cerrada']);
+        setTimeout(() => setCdseSuccess(null), 3500);
+    };
+
     const handleVerifyAccess = async () => {
-        if (!cdseUsername || !cdsePassword) {
+        const isPass = cdseAuthMode === 'password';
+        if (isPass && (!cdseUsername || !cdsePassword)) {
             setCdseError('Ingresa tu email y contraseña de Copernicus para verificar.');
+            setCdseSuccess(null);
+            return;
+        }
+        if (!isPass && (!cdseClientId || !cdseClientSecret)) {
+            setCdseError('Ingresa tu Client ID y Client Secret de Copernicus OAuth para verificar.');
             setCdseSuccess(null);
             return;
         }
@@ -789,10 +882,10 @@ export default function Dashboard() {
         setCdseSuccess(null);
         const API = getApiUrl();
         try {
-            const res = await axios.post(`${API}/verify-credentials`, {
-                username: cdseUsername,
-                password: cdsePassword
-            });
+            const payload = isPass
+                ? { username: cdseUsername, password: cdsePassword }
+                : { client_id: cdseClientId, client_secret: cdseClientSecret };
+            const res = await axios.post(`${API}/verify-credentials`, payload);
             setCdseSuccess(res.data?.message || 'Acceso verificado exitosamente con Copernicus Hub.');
             setProcessLog(prev => [...prev, '[OK] Acceso a Copernicus CDSE verificado']);
         } catch (err: any) {
@@ -809,15 +902,19 @@ export default function Dashboard() {
         setCdseError(null);
         setCdseSuccess(null);
         const API = getApiUrl();
+        const isPass = cdseAuthMode === 'password';
         try {
-            await axios.post(`${API}/set-credentials`, {
-                username: cdseUsername,
-                password: cdsePassword
-            });
+            const payload = isPass
+                ? { username: cdseUsername, password: cdsePassword }
+                : { client_id: cdseClientId, client_secret: cdseClientSecret };
+            await axios.post(`${API}/set-credentials`, payload);
             try {
                 localStorage.setItem('cdse_credentials', JSON.stringify({
+                    authMode: cdseAuthMode,
                     username: cdseUsername,
-                    password: cdsePassword
+                    password: cdsePassword,
+                    clientId: cdseClientId,
+                    clientSecret: cdseClientSecret
                 }));
             } catch {}
             setCdseConfigured(true);
@@ -897,12 +994,14 @@ export default function Dashboard() {
                 const saved = localStorage.getItem('cdse_credentials');
                 if (saved) {
                     const parsed = JSON.parse(saved);
-                    if (parsed.username && parsed.password) {
+                    const isPass = parsed.authMode !== 'oauth';
+                    const hasData = isPass ? (parsed.username && parsed.password) : (parsed.clientId && parsed.clientSecret);
+                    if (hasData) {
                         setProcessLog(prev => [...prev, "🔑 Conectando credenciales CDSE..."]);
-                        const authRes = await axios.post(`${getApiUrl()}/set-credentials`, {
-                            username: parsed.username,
-                            password: parsed.password
-                        });
+                        const payload = isPass
+                            ? { username: parsed.username, password: parsed.password }
+                            : { client_id: parsed.clientId, client_secret: parsed.clientSecret };
+                        const authRes = await axios.post(`${getApiUrl()}/set-credentials`, payload);
                         if (authRes.data?.status === 'ok') {
                             setCdseConfigured(true);
                             restored = true;
@@ -980,8 +1079,16 @@ export default function Dashboard() {
 
         try {
             setProcessLog(prev => [...prev, "⚙️  Procesando todos los índices con CDSE..."]);
+            const headers: Record<string, string> = {};
+            if (cdseAuthMode === 'password' && cdseUsername && cdsePassword) {
+                headers['X-CDSE-Username'] = cdseUsername;
+                headers['X-CDSE-Password'] = cdsePassword;
+            } else if (cdseAuthMode === 'oauth' && cdseClientId && cdseClientSecret) {
+                headers['X-CDSE-Client-Id'] = cdseClientId;
+                headers['X-CDSE-Client-Secret'] = cdseClientSecret;
+            }
             // Use analyze-all endpoint
-            const res = await axios.post(`${getApiUrl()}/analyze-all`, payload);
+            const res = await axios.post(`${getApiUrl()}/analyze-all`, payload, { headers });
 
             if (res.data.status === 'success') {
                 const data = res.data.data;
@@ -1032,7 +1139,8 @@ export default function Dashboard() {
 
 
     const handleDownloadReport = async () => {
-        if (!results || !selectedWetland) {
+        const hasArea = areaSource === 'wetland' ? !!selectedWetland : !!customArea;
+        if (!results || !hasArea) {
             alert('Debes ejecutar un análisis primero');
             return;
         }
@@ -1041,24 +1149,38 @@ export default function Dashboard() {
             setGeneratingReport(true); // Show report generation indicator
             setProcessLog(prev => [...prev, "📄 Generando reporte (esto puede tardar unos segundos)..."]);
 
-            const bbox = selectedWetland.bbox;
-            const centerLat = ((bbox[1] + bbox[3]) / 2).toFixed(4);
-            const centerLon = ((bbox[0] + bbox[2]) / 2).toFixed(4);
+            const areaName = selectedWetland?.name || customAreaName || 'Área Personalizada';
+            const bbox = (areaSource === 'wetland' && selectedWetland?.bbox)
+                ? selectedWetland.bbox
+                : (customArea ? getBoundsFromGeometry(customArea) : [-70.8, -33.4, -70.7, -33.3]);
+            const centerLat = bbox ? ((bbox[1] + bbox[3]) / 2).toFixed(4) : '-33.0000';
+            const centerLon = bbox ? ((bbox[0] + bbox[2]) / 2).toFixed(4) : '-70.0000';
 
             const reportPayload = {
-                wetland_name: selectedWetland.name,
+                wetland_name: areaName,
                 wetland_metadata: {
-                    region: selectedWetland.region,
-                    code: selectedWetland.code || 'N/A',
+                    region: selectedWetland?.region || 'Zona Personalizada',
+                    code: selectedWetland?.code || 'CUSTOM',
                     coordinates: `${centerLat}, ${centerLon}`,
-                    geometry: selectedWetland.geometry || customArea || null
+                    geometry: selectedWetland?.geometry || customArea || null,
+                    bbox: bbox || null
                 },
                 analysis_results: results,
                 start_date: startDate,
                 end_date: endDate
             };
 
+            const headers: Record<string, string> = {};
+            if (cdseAuthMode === 'password' && cdseUsername && cdsePassword) {
+                headers['X-CDSE-Username'] = cdseUsername;
+                headers['X-CDSE-Password'] = cdsePassword;
+            } else if (cdseAuthMode === 'oauth' && cdseClientId && cdseClientSecret) {
+                headers['X-CDSE-Client-Id'] = cdseClientId;
+                headers['X-CDSE-Client-Secret'] = cdseClientSecret;
+            }
+
             const res = await axios.post(`${getApiUrl()}/generate-report`, reportPayload, {
+                headers,
                 responseType: 'blob'
             });
 
@@ -1066,7 +1188,7 @@ export default function Dashboard() {
             const url = window.URL.createObjectURL(new Blob([res.data]));
             const link = document.createElement('a');
             link.href = url;
-            link.setAttribute('download', `Reporte_Comparativo_${selectedWetland.name.replace(/\s+/g, '_')}_${startDate}_a_${endDate}.docx`);
+            link.setAttribute('download', `Reporte_Comparativo_${areaName.replace(/\s+/g, '_')}_${startDate}_a_${endDate}.docx`);
             document.body.appendChild(link);
             link.click();
             link.remove();
@@ -1120,7 +1242,9 @@ export default function Dashboard() {
                     <div className="flex items-center justify-between">
                         <div className={`flex items-center gap-2 text-sm font-bold ${cdseConfigured ? 'text-green-400' : 'text-amber-400'}`}>
                             <span className={`w-2 h-2 rounded-full animate-pulse ${cdseConfigured ? 'bg-green-500' : 'bg-amber-500'}`} />
-                            {cdseConfigured ? 'CDSE ACTIVO' : 'CDSE NO CONFIGURADO'}
+                            {isInstitutionalServer 
+                                ? ((cdseUsername || cdseClientId) ? 'CDSE PERSONAL (Activo)' : 'CDSE INSTITUCIONAL')
+                                : (cdseConfigured ? 'CDSE ACTIVO' : 'CDSE NO CONFIGURADO')}
                         </div>
                         <button
                             onClick={() => setShowCredentials(v => !v)}
@@ -1133,28 +1257,73 @@ export default function Dashboard() {
 
                     {showCredentials && (
                         <form onSubmit={handleSetCredentials} className="flex flex-col gap-2.5 animate-in fade-in slide-in-from-top-2">
-                            <div>
-                                <label className="text-[9px] text-gray-400 uppercase font-semibold mb-1 block">Email Copernicus</label>
-                                <input
-                                    value={cdseUsername}
-                                    onChange={e => { setCdseUsername(e.target.value); setCdseError(null); setCdseSuccess(null); }}
-                                    type="email"
-                                    placeholder="usuario@ejemplo.com"
-                                    autoComplete="username"
-                                    className="w-full bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-blue-500/60 transition-colors"
-                                />
+                            {/* Selector de tipo de credencial: Email/Clave vs OAuth Client */}
+                            <div className="flex gap-1 bg-black/60 rounded-lg p-1 border border-white/10">
+                                <button
+                                    type="button"
+                                    onClick={() => { setCdseAuthMode('password'); setCdseError(null); }}
+                                    className={`flex-1 text-[9px] font-bold py-1.5 rounded transition-all flex items-center justify-center gap-1 ${cdseAuthMode === 'password' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'}`}
+                                >
+                                    <User className="w-3 h-3" /> Email y Clave
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => { setCdseAuthMode('oauth'); setCdseError(null); }}
+                                    className={`flex-1 text-[9px] font-bold py-1.5 rounded transition-all flex items-center justify-center gap-1 ${cdseAuthMode === 'oauth' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:text-white'}`}
+                                >
+                                    <Key className="w-3 h-3" /> OAuth Client
+                                </button>
                             </div>
-                            <div>
-                                <label className="text-[9px] text-gray-400 uppercase font-semibold mb-1 block">Contraseña</label>
-                                <input
-                                    value={cdsePassword}
-                                    onChange={e => { setCdsePassword(e.target.value); setCdseError(null); setCdseSuccess(null); }}
-                                    type="password"
-                                    placeholder="••••••••••••••••"
-                                    autoComplete="current-password"
-                                    className="w-full bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-blue-500/60 transition-colors"
-                                />
-                            </div>
+
+                            {cdseAuthMode === 'password' ? (
+                                <>
+                                    <div>
+                                        <label className="text-[9px] text-gray-400 uppercase font-semibold mb-1 block">Email Copernicus</label>
+                                        <input
+                                            value={cdseUsername}
+                                            onChange={e => { setCdseUsername(e.target.value); setCdseError(null); setCdseSuccess(null); }}
+                                            type="email"
+                                            placeholder="usuario@ejemplo.com"
+                                            autoComplete="username"
+                                            className="w-full bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-blue-500/60 transition-colors"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-[9px] text-gray-400 uppercase font-semibold mb-1 block">Contraseña</label>
+                                        <input
+                                            value={cdsePassword}
+                                            onChange={e => { setCdsePassword(e.target.value); setCdseError(null); setCdseSuccess(null); }}
+                                            type="password"
+                                            placeholder="••••••••••••••••"
+                                            autoComplete="current-password"
+                                            className="w-full bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-blue-500/60 transition-colors"
+                                        />
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <div>
+                                        <label className="text-[9px] text-gray-400 uppercase font-semibold mb-1 block">OAuth Client ID</label>
+                                        <input
+                                            value={cdseClientId}
+                                            onChange={e => { setCdseClientId(e.target.value); setCdseError(null); setCdseSuccess(null); }}
+                                            type="text"
+                                            placeholder="cdse-client-xxxx-xxxx"
+                                            className="w-full bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-blue-500/60 transition-colors font-mono"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-[9px] text-gray-400 uppercase font-semibold mb-1 block">OAuth Client Secret</label>
+                                        <input
+                                            value={cdseClientSecret}
+                                            onChange={e => { setCdseClientSecret(e.target.value); setCdseError(null); setCdseSuccess(null); }}
+                                            type="password"
+                                            placeholder="••••••••••••••••"
+                                            className="w-full bg-black border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white outline-none focus:border-blue-500/60 transition-colors font-mono"
+                                        />
+                                    </div>
+                                </>
+                            )}
 
                             {cdseError && (
                                 <div className="text-[9px] text-red-400 bg-red-500/10 border border-red-500/20 px-2.5 py-1.5 rounded flex items-start gap-1.5 leading-tight animate-in fade-in">
@@ -1174,7 +1343,7 @@ export default function Dashboard() {
                                 <button
                                     type="button"
                                     onClick={handleVerifyAccess}
-                                    disabled={verifyingCreds || savingCreds || !cdseUsername || !cdsePassword}
+                                    disabled={verifyingCreds || savingCreds || (cdseAuthMode === 'password' ? (!cdseUsername || !cdsePassword) : (!cdseClientId || !cdseClientSecret))}
                                     className="flex-1 bg-gray-800 hover:bg-gray-700 border border-white/10 disabled:bg-gray-900/60 disabled:text-gray-600 text-[10px] py-2 rounded-lg font-bold transition-all text-gray-200 flex items-center justify-center gap-1.5"
                                 >
                                     {verifyingCreds ? (
@@ -1185,7 +1354,7 @@ export default function Dashboard() {
                                 </button>
                                 <button
                                     type="submit"
-                                    disabled={savingCreds || verifyingCreds || !cdseUsername || !cdsePassword}
+                                    disabled={savingCreds || verifyingCreds || (cdseAuthMode === 'password' ? (!cdseUsername || !cdsePassword) : (!cdseClientId || !cdseClientSecret))}
                                     className="flex-1 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-[10px] py-2 rounded-lg font-bold transition-all text-white flex items-center justify-center gap-1.5 shadow-[0_0_15px_rgba(37,99,235,0.25)]"
                                 >
                                     {savingCreds ? (
@@ -1195,8 +1364,19 @@ export default function Dashboard() {
                                     )}
                                 </button>
                             </div>
+
+                            {(cdseUsername || cdseClientId || cdseConfigured) && (
+                                <button
+                                    type="button"
+                                    onClick={handleDisconnect}
+                                    className="w-full mt-0.5 bg-red-950/40 hover:bg-red-900/50 border border-red-500/20 text-red-300 text-[9px] py-1.5 rounded-lg font-semibold transition-all flex items-center justify-center gap-1"
+                                >
+                                    <LogOut className="w-3 h-3" /> Desconectar / Cambiar de cuenta
+                                </button>
+                            )}
+
                             <p className="text-[8px] text-gray-500 leading-relaxed">
-                                Credenciales de tu cuenta de <span className="text-blue-400 underline">dataspace.copernicus.eu</span> para ingesta Sentinel-2.
+                                Compatible con cualquier cuenta de <span className="text-blue-400 underline">dataspace.copernicus.eu</span> (personal o institucional). Si agotas tu cuota de unidades de procesamiento (PUs), puedes cambiar de cuenta aquí.
                             </p>
                         </form>
                     )}

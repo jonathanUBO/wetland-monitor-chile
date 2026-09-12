@@ -198,23 +198,24 @@ def validate_geometry(geojson: Dict[str, Any], min_area_km2: float = 0.01, max_a
 def calculate_robust_statistics(data: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
     """Calculate robust statistics resistant to outliers."""
     values = [d['value'] for d in data if d.get('value') is not None]
-    if len(values) < 3: return None
+    if not values:
+        return None
     
     values_array = np.array(values)
-    mean_val = np.mean(values_array)
-    std_val = np.std(values_array)
-    cv = (std_val / mean_val * 100) if mean_val != 0 else 0
-    p25 = np.percentile(values_array, 25)
-    p75 = np.percentile(values_array, 75)
+    mean_val = float(np.mean(values_array))
+    std_val = float(np.std(values_array)) if len(values) > 1 else 0.0
+    cv = (std_val / mean_val * 100) if mean_val != 0 else 0.0
+    p25 = float(np.percentile(values_array, 25))
+    p75 = float(np.percentile(values_array, 75))
     
     return {
-        'mean': float(mean_val),
+        'mean': mean_val,
         'median': float(np.median(values_array)),
-        'std': float(std_val),
+        'std': std_val,
         'min': float(np.min(values_array)),
         'max': float(np.max(values_array)),
         'count': len(values),
-        'cv': float(cv),
+        'cv': cv,
         'iqr': float(p75 - p25)
     }
 
@@ -367,7 +368,23 @@ def calculate_trend_statistics(current_data: List[Dict], previous_data: List[Dic
 
 _thumb_cache: Dict[str, bytes] = {}
 
-def fetch_thumbnail_bytes(mode: str, start_date: str, end_date: str, geometry: Optional[dict] = None, wetland_name: Optional[str] = None) -> Optional[io.BytesIO]:
+def is_blank_image(png_bytes: Optional[bytes]) -> bool:
+    """Check if a PNG image is empty, zero-sized, or entirely transparent/black."""
+    if not png_bytes or len(png_bytes) < 300:
+        return True
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(png_bytes))
+        arr = np.array(im)
+        if arr.size == 0 or arr.max() == 0:
+            return True
+        if arr.ndim == 3 and arr.shape[2] == 4 and arr[:, :, 3].max() == 0:
+            return True
+        return False
+    except Exception:
+        return False
+
+def fetch_thumbnail_bytes(mode: str, start_date: str, end_date: str, geometry: Optional[dict] = None, wetland_name: Optional[str] = None, token: Optional[str] = None) -> Optional[io.BytesIO]:
     """Fetch Sentinel-2 PNG thumbnail directly using get_overlay_bytes.
     Leverages in-memory cache, aspect ratio preservation, deduplication, and multi-tier cloud fallbacks.
     """
@@ -381,8 +398,20 @@ def fetch_thumbnail_bytes(mode: str, start_date: str, end_date: str, geometry: O
         import shapely.geometry as sg
         geom = sg.shape(geometry)
         bounds = list(geom.bounds)
-        content = get_overlay_bytes(mode, start_date, end_date, bounds, geometry=geometry)
-        if content and len(content) >= 500:
+        content = get_overlay_bytes(mode, start_date, end_date, bounds, geometry=geometry, token=token)
+        
+        # If the specific initial window has no clear scenes at all, expand the window progressively
+        if not content or is_blank_image(content):
+            for add_years in [1, 2, 3]:
+                try:
+                    e_dt = datetime.strptime(end_date[:10], "%Y-%m-%d") + relativedelta(years=add_years)
+                    content = get_overlay_bytes(mode, start_date, e_dt.strftime("%Y-%m-%d"), bounds, geometry=geometry, token=token)
+                    if content and len(content) >= 500 and not is_blank_image(content):
+                        break
+                except Exception:
+                    pass
+                
+        if content and len(content) >= 500 and not is_blank_image(content):
             return io.BytesIO(content)
         return None
     except Exception as e:
@@ -471,7 +500,7 @@ def create_temporal_chart(time_series: List[Dict], mode: str) -> io.BytesIO:
     img_buffer.seek(0)
     return img_buffer
 
-def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_results: Dict, start_date: str, end_date: str) -> io.BytesIO:
+def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_results: Dict, start_date: str, end_date: str, token: Optional[str] = None) -> io.BytesIO:
     """Generate a comprehensive Word report for wetland analysis comparing initial and final periods."""
     doc = Document()
     header = doc.sections[0].header
@@ -499,38 +528,74 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
     meta_table.rows[4].cells[1].text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     doc.add_paragraph()
     
+    # Extract actual observed dates from analysis_results to anchor windows to real data
+    obs_dates = []
+    for m_res in analysis_results.values():
+        if isinstance(m_res, dict) and 'time_series' in m_res:
+            for pt in m_res['time_series']:
+                if pt.get('value') is not None and pt.get('date'):
+                    obs_dates.append(pt['date'])
+    
+    if obs_dates:
+        obs_dates.sort()
+        earliest_obs = obs_dates[0]
+        latest_obs = obs_dates[-1]
+    else:
+        earliest_obs = start_date[:10]
+        latest_obs = end_date[:10]
+
     # Calculate comparative periods
     try:
         start_dt = datetime.strptime(start_date[:10], '%Y-%m-%d')
         end_dt = datetime.strptime(end_date[:10], '%Y-%m-%d')
-        start_year = str(start_dt.year)
-        end_year = str(end_dt.year)
-        diff_years = end_dt.year - start_dt.year
+        earliest_dt = datetime.strptime(earliest_obs, '%Y-%m-%d')
+        latest_dt = datetime.strptime(latest_obs, '%Y-%m-%d')
+        
+        # Anchor to real acquisitions if start_date precedes available satellite archive
+        effective_start_dt = max(start_dt, earliest_dt)
+        effective_end_dt = min(end_dt, latest_dt)
+        start_year = str(effective_start_dt.year)
+        end_year = str(effective_end_dt.year)
+        
+        diff_years = effective_end_dt.year - effective_start_dt.year
         if diff_years >= 2:
-            s_end = (start_dt + relativedelta(years=1)).strftime('%Y-%m-%d')
-            e_start = (end_dt - relativedelta(years=1)).strftime('%Y-%m-%d')
+            s_start = effective_start_dt.strftime('%Y-%m-%d')
+            s_end = (effective_start_dt + relativedelta(years=1)).strftime('%Y-%m-%d')
+            e_start = (effective_end_dt - relativedelta(years=1)).strftime('%Y-%m-%d')
+            e_end = effective_end_dt.strftime('%Y-%m-%d')
         else:
-            half_days = max(30, (end_dt - start_dt).days // 2)
-            s_end = (start_dt + timedelta(days=half_days)).strftime('%Y-%m-%d')
-            e_start = (end_dt - timedelta(days=half_days)).strftime('%Y-%m-%d')
+            half_days = max(30, (effective_end_dt - effective_start_dt).days // 2)
+            s_start = effective_start_dt.strftime('%Y-%m-%d')
+            s_end = (effective_start_dt + timedelta(days=half_days)).strftime('%Y-%m-%d')
+            e_start = (effective_end_dt - timedelta(days=half_days)).strftime('%Y-%m-%d')
+            e_end = effective_end_dt.strftime('%Y-%m-%d')
     except Exception:
         start_year = start_date[:4] if len(start_date) >= 4 else "Inicial"
         end_year = end_date[:4] if len(end_date) >= 4 else "Final"
+        s_start = start_date
         s_end = start_date
         e_start = end_date
+        e_end = end_date
 
     doc.add_heading('Período de Análisis Comparativo', level=2)
     p = doc.add_paragraph()
     p.add_run('Rango Completo: ').bold = True
     p.add_run(f'{start_date} a {end_date}\n')
     p.add_run(f'• Período Inicial ({start_year}): ').bold = True
-    p.add_run(f'{start_date} a {s_end}\n')
+    p.add_run(f'{s_start} a {s_end}\n')
     p.add_run(f'• Período Final ({end_year}): ').bold = True
-    p.add_run(f'{e_start} a {end_date}')
+    p.add_run(f'{e_start} a {e_end}')
     doc.add_paragraph()
 
     modes = ['Hydrology', 'Vegetation', 'WaterQuality', 'SoilVegetation', 'AlgaeBloom', 'WaterRatio']
     geometry = wetland_metadata.get('geometry') or get_wetland_geometry(wetland_name)
+    if not geometry and wetland_metadata.get('bbox'):
+        b = wetland_metadata['bbox']
+        if isinstance(b, (list, tuple)) and len(b) == 4:
+            geometry = {
+                "type": "Polygon",
+                "coordinates": [[[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]], [b[0], b[1]]]]
+            }
     thumbnails_map: Dict[Tuple[str, str], Optional[io.BytesIO]] = {}
     
     if geometry:
@@ -539,12 +604,12 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
         # Pre-fetch RGB (natural color satellite images) and all active modes
         prefetch_modes = ['RGB'] + [m for m in modes if m in analysis_results]
         for m in prefetch_modes:
-            tasks.append((m, 'start', start_date, s_end))
-            tasks.append((m, 'end', e_start, end_date))
+            tasks.append((m, 'start', s_start, s_end))
+            tasks.append((m, 'end', e_start, e_end))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             future_to_task = {
-                executor.submit(fetch_thumbnail_bytes, m, s, e, geometry, wetland_name): (m, kind)
+                executor.submit(fetch_thumbnail_bytes, m, s, e, geometry, wetland_name, token): (m, kind)
                 for (m, kind, s, e) in tasks
             }
             for future in concurrent.futures.as_completed(future_to_task):
@@ -576,20 +641,20 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
         if rgb_start:
             rgb_start.seek(0)
             c_rgb_start.paragraphs[0].add_run().add_picture(rgb_start, width=Inches(2.8))
-            c_rgb_cap_start.text = f"Fotografía Inicial ({start_date[:10]} - {s_end[:10]})"
+            c_rgb_cap_start.text = f"Fotografía Inicial ({s_start[:10]} - {s_end[:10]})"
             c_rgb_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         else:
-            c_rgb_cap_start.text = f"Fotografía Inicial ({start_date[:10]}): Sin imagen disponible"
+            c_rgb_cap_start.text = f"Fotografía Inicial ({s_start[:10]}): Sin imagen disponible"
             c_rgb_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             
         c_rgb_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         if rgb_end:
             rgb_end.seek(0)
             c_rgb_end.paragraphs[0].add_run().add_picture(rgb_end, width=Inches(2.8))
-            c_rgb_cap_end.text = f"Fotografía Final ({e_start[:10]} - {end_date[:10]})"
+            c_rgb_cap_end.text = f"Fotografía Final ({e_start[:10]} - {e_end[:10]})"
             c_rgb_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         else:
-            c_rgb_cap_end.text = f"Fotografía Final ({end_date[:10]}): Sin imagen disponible"
+            c_rgb_cap_end.text = f"Fotografía Final ({e_end[:10]}): Sin imagen disponible"
             c_rgb_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.add_paragraph()
 
@@ -670,20 +735,20 @@ def generate_wetland_report(wetland_name: str, wetland_metadata: Dict, analysis_
             if img_start:
                 img_start.seek(0)
                 c_start.paragraphs[0].add_run().add_picture(img_start, width=Inches(2.8))
-                c_cap_start.text = f"Mapa Inicial ({start_date[:10]} - {s_end[:10]})"
+                c_cap_start.text = f"Mapa Inicial ({s_start[:10]} - {s_end[:10]})"
                 c_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             else:
-                c_cap_start.text = f"Mapa Inicial ({start_date[:10]}): Sin imagen disponible"
+                c_cap_start.text = f"Mapa Inicial ({s_start[:10]}): Sin imagen disponible"
                 c_cap_start.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 
             c_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             if img_end:
                 img_end.seek(0)
                 c_end.paragraphs[0].add_run().add_picture(img_end, width=Inches(2.8))
-                c_cap_end.text = f"Mapa Final ({e_start[:10]} - {end_date[:10]})"
+                c_cap_end.text = f"Mapa Final ({e_start[:10]} - {e_end[:10]})"
                 c_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
             else:
-                c_cap_end.text = f"Mapa Final ({end_date[:10]}): Sin imagen disponible"
+                c_cap_end.text = f"Mapa Final ({e_end[:10]}): Sin imagen disponible"
                 c_cap_end.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 
         legend = create_legend_image(mode)
@@ -728,47 +793,17 @@ _env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=_env_path)
 load_dotenv()
 
-# Support both password grant (email+password) and client_credentials
-CDSE_USERNAME = os.getenv("CDSE_USERNAME", "")
-CDSE_PASSWORD = os.getenv("CDSE_PASSWORD", "")
-CDSE_CLIENT_ID = os.getenv("CDSE_CLIENT_ID", "")
-CDSE_CLIENT_SECRET = os.getenv("CDSE_CLIENT_SECRET", "")
+# Institutional server credentials (from environment)
+CDSE_SERVER_USERNAME = os.getenv("CDSE_USERNAME", "").strip()
+CDSE_SERVER_PASSWORD = os.getenv("CDSE_PASSWORD", "").strip()
+CDSE_SERVER_CLIENT_ID = os.getenv("CDSE_CLIENT_ID", "").strip()
+CDSE_SERVER_CLIENT_SECRET = os.getenv("CDSE_CLIENT_SECRET", "").strip()
 
-_CDSE_STORAGE_PATH = Path(__file__).resolve().parent / "_cdse_storage.json"
-
-def _load_persisted_credentials():
-    global CDSE_USERNAME, CDSE_PASSWORD, CDSE_CLIENT_ID, CDSE_CLIENT_SECRET
-    if not (CDSE_USERNAME and CDSE_PASSWORD) and not (CDSE_CLIENT_ID and CDSE_CLIENT_SECRET):
-        if _CDSE_STORAGE_PATH.exists():
-            try:
-                with open(_CDSE_STORAGE_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    CDSE_USERNAME = data.get("username", "")
-                    CDSE_PASSWORD = data.get("password", "")
-                    CDSE_CLIENT_ID = data.get("client_id", "")
-                    CDSE_CLIENT_SECRET = data.get("client_secret", "")
-                    if CDSE_USERNAME or CDSE_CLIENT_ID:
-                        logger.info("Persisted CDSE credentials reloaded from local storage")
-            except Exception as e:
-                logger.warning(f"Could not load persisted credentials: {e}")
-
-def _save_persisted_credentials():
-    try:
-        data = {
-            "username": CDSE_USERNAME,
-            "password": CDSE_PASSWORD,
-            "client_id": CDSE_CLIENT_ID,
-            "client_secret": CDSE_CLIENT_SECRET
-        }
-        with open(_CDSE_STORAGE_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-    except Exception as e:
-        logger.warning(f"Could not persist credentials: {e}")
-
-_load_persisted_credentials()
-
-if not (CDSE_USERNAME and CDSE_PASSWORD) and not (CDSE_CLIENT_ID and CDSE_CLIENT_SECRET):
-    logger.warning("CDSE credentials not found in env or storage. Configure via UI or .env file.")
+def is_server_configured() -> bool:
+    """Return True if institutional credentials are configured on the server."""
+    has_pass = bool(CDSE_SERVER_USERNAME and CDSE_SERVER_PASSWORD)
+    has_oauth = bool(CDSE_SERVER_CLIENT_ID and CDSE_SERVER_CLIENT_SECRET)
+    return has_pass or has_oauth
 
 # Robust HTTP session with connection pooling and retries
 http_session = requests.Session()
@@ -780,61 +815,104 @@ retries = Retry(
 )
 http_session.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=20))
 
-# Thread-safe token caching
-_cdse_token_cache = {
-    "token": None,
-    "expires_at": 0.0
-}
+# Thread-safe multi-tenant token cache keyed by credentials
+_cdse_token_cache: Dict[str, Dict[str, Any]] = {}
 _cdse_token_lock = threading.Lock()
+_last_active_token: Optional[Dict[str, Any]] = None
 
-def invalidate_cdse_token():
-    """Invalidate token cache (e.g., when credentials are updated)."""
+def invalidate_cdse_token(key: Optional[str] = None):
+    """Invalidate token cache for a key or all keys."""
+    global _last_active_token
     with _cdse_token_lock:
-        _cdse_token_cache["token"] = None
-        _cdse_token_cache["expires_at"] = 0.0
+        if key:
+            _cdse_token_cache.pop(key, None)
+        else:
+            _cdse_token_cache.clear()
+            _last_active_token = None
 
-def get_cdse_token() -> str:
-    """Retrieve OAuth token for Copernicus Data Space Ecosystem with thread-safe caching.
-    Supports two grant types:
-    1. password grant: email + password (standard user account at dataspace.copernicus.eu)
-    2. client_credentials: OAuth client_id + client_secret (service account)
+def get_cdse_token(
+    token: Optional[str] = None,
+    username: str = "",
+    password: str = "",
+    client_id: str = "",
+    client_secret: str = "",
+    bearer_token: str = ""
+) -> str:
+    """Retrieve OAuth token for Copernicus Data Space Ecosystem.
+    Resolution priority:
+    1. Direct bearer token if supplied
+    2. Per-request credentials passed in parameters / headers
+    3. Institutional server credentials from environment
+    4. Most recently verified session token (supports multi-account / BYOC without env vars)
     """
-    global _cdse_token_cache
+    global _last_active_token
     now = time.time()
-    
-    with _cdse_token_lock:
-        # Re-use cached token if still valid with a 60s safety buffer
-        if _cdse_token_cache["token"] and now < (_cdse_token_cache["expires_at"] - 60):
-            return _cdse_token_cache["token"]
 
-        token_url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
-        
-        if CDSE_USERNAME and CDSE_PASSWORD:
+    if token:
+        with _cdse_token_lock:
+            _last_active_token = {"token": token, "expires_at": now + 600}
+        return token
+    if bearer_token:
+        clean_b = bearer_token.replace("Bearer ", "").strip()
+        if clean_b:
+            with _cdse_token_lock:
+                _last_active_token = {"token": clean_b, "expires_at": now + 600}
+            return clean_b
+
+    u = username.strip() or CDSE_SERVER_USERNAME
+    p = password.strip() or CDSE_SERVER_PASSWORD
+    cid = client_id.strip() or CDSE_SERVER_CLIENT_ID
+    csec = client_secret.strip() or CDSE_SERVER_CLIENT_SECRET
+
+    if not (u and p) and not (cid and csec):
+        with _cdse_token_lock:
+            if _last_active_token and now < (_last_active_token["expires_at"] - 30):
+                return _last_active_token["token"]
+        raise HTTPException(
+            401,
+            detail="Credenciales de Copernicus CDSE no configuradas. Por favor ingresa tus credenciales en el panel lateral o define variables institucionales en el servidor."
+        )
+
+    cache_key = f"{u}:{p}" if (u and p) else f"{cid}:{csec}"
+
+    with _cdse_token_lock:
+        entry = _cdse_token_cache.get(cache_key)
+        if entry and now < (entry["expires_at"] - 60):
+            _last_active_token = entry
+            return entry["token"]
+
+    token_url = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+
+    try:
+        if u and p:
             from oauthlib.oauth2 import LegacyApplicationClient
             from requests_oauthlib import OAuth2Session
             client = LegacyApplicationClient(client_id="cdse-public")
             oauth = OAuth2Session(client=client)
-            token_resp = oauth.fetch_token(token_url=token_url, username=CDSE_USERNAME, password=CDSE_PASSWORD)
-            token = token_resp['access_token']
-            expires_in = token_resp.get('expires_in', 600)
-            _cdse_token_cache["token"] = token
-            _cdse_token_cache["expires_at"] = now + float(expires_in)
-            return token
-            
-        elif CDSE_CLIENT_ID and CDSE_CLIENT_SECRET:
+            token_resp = oauth.fetch_token(token_url=token_url, username=u, password=p)
+        else:
             from oauthlib.oauth2 import BackendApplicationClient
             from requests_oauthlib import OAuth2Session
-            client = BackendApplicationClient(client_id=CDSE_CLIENT_ID)
+            client = BackendApplicationClient(client_id=cid)
             oauth = OAuth2Session(client=client)
-            token_resp = oauth.fetch_token(token_url=token_url, client_id=CDSE_CLIENT_ID, client_secret=CDSE_CLIENT_SECRET)
-            token = token_resp['access_token']
-            expires_in = token_resp.get('expires_in', 600)
-            _cdse_token_cache["token"] = token
-            _cdse_token_cache["expires_at"] = now + float(expires_in)
-            return token
-            
-        else:
-            raise RuntimeError("No CDSE credentials configured. Use the Credentials panel in the app or .env file.")
+            token_resp = oauth.fetch_token(token_url=token_url, client_id=cid, client_secret=csec)
+
+        access_token = token_resp['access_token']
+        expires_in = float(token_resp.get('expires_in', 600))
+
+        with _cdse_token_lock:
+            new_entry = {
+                "token": access_token,
+                "expires_at": now + expires_in
+            }
+            _cdse_token_cache[cache_key] = new_entry
+            _last_active_token = new_entry
+        return access_token
+    except Exception as e:
+        err_msg = str(e)
+        if "invalid_grant" in err_msg.lower() or "unauthorized" in err_msg.lower():
+            raise HTTPException(401, detail="Credenciales incorrectas de Copernicus CDSE. Verifique su correo/clave o Client ID/Secret.")
+        raise HTTPException(502, detail=f"Error al conectar con Copernicus OAuth: {err_msg}")
 
 class AnalysisRequest(BaseModel):
     geojson: Dict[str, Any]
@@ -970,9 +1048,9 @@ function evaluatePixel(sample) {{
   return {{ default: [val], dataMask: [1] }};
 }}"""
 
-def analyze_period(aoi, start_date, end_date, mode):
+def analyze_period(aoi, start_date, end_date, mode, token: Optional[str] = None):
     """Analyze a specific period for time series data using CDSE API with grid splitting for high resolution."""
-    token = get_cdse_token()
+    token = token or get_cdse_token()
     url = "https://sh.dataspace.copernicus.eu/api/v1/statistics"
     evalscript = get_evalscript(mode, is_process=False)
 
@@ -1030,7 +1108,7 @@ def analyze_period(aoi, start_date, end_date, mode):
                     "type": "sentinel-2-l2a",
                     "dataFilter": {
                         "timeRange": {"from": f"{start_date}T00:00:00Z", "to": f"{end_date}T23:59:59Z"},
-                        "maxCloudCoverage": 10
+                        "maxCloudCoverage": 20
                     }
                 }]
             },
@@ -1051,7 +1129,19 @@ def analyze_period(aoi, start_date, end_date, mode):
                 timeout=45
             )
             if resp.status_code != 200:
-                logger.error(f"CDSE API Error on chunk: {resp.text[:300]}")
+                err_text = resp.text
+                logger.error(f"CDSE API Error on chunk ({resp.status_code}): {err_text[:300]}")
+                err_upper = err_text.upper()
+                if resp.status_code == 401 or "UNAUTHORIZED" in err_upper:
+                    raise ValidationError("Credenciales o token de acceso de Copernicus CDSE rechazados (HTTP 401). Verifica tu usuario y contraseña en el panel lateral.")
+                if resp.status_code == 403:
+                    if "PROCESSING_UNITS" in err_upper or "INSUFFICIENT" in err_upper or "CREDIT" in err_upper:
+                        raise ValidationError("Cuota de Unidades de Procesamiento (PUs) agotada en Copernicus CDSE (HTTP 403). Tu cuenta gratuita ha consumido su saldo mensual en dataspace.copernicus.eu. Cambia de credenciales en el panel lateral.")
+                    raise ValidationError(f"Acceso denegado en Copernicus CDSE (HTTP 403): {err_text[:200]}")
+                if resp.status_code == 429 or "RATE_LIMIT" in err_upper:
+                    raise ValidationError("Límite de tasa excedido en Copernicus CDSE (HTTP 429). Se realizaron demasiadas solicitudes por minuto. Espera 60 segundos antes de reintentar.")
+                if resp.status_code >= 400:
+                    raise ValidationError(f"Error en servicio satelital Copernicus CDSE ({resp.status_code}): {err_text[:200]}")
                 return []
             
             chunk_ts = []
@@ -1074,19 +1164,23 @@ def analyze_period(aoi, start_date, end_date, mode):
                     if val is not None and count > 0:
                         chunk_ts.append({'date': date_str, 'value': val, 'weight': count})
             return chunk_ts
+        except ValidationError:
+            raise
         except Exception as ex:
             logger.error(f"Network error on chunk: {ex}")
             return []
 
     all_series = []
-    # Use max 5 workers to parallelize without triggering rate limits excessively
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # Use max 4 workers to parallelize without triggering rate limits excessively
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(fetch_chunk, ch) for ch in chunks]
         for future in concurrent.futures.as_completed(futures):
             try:
                 res = future.result()
                 if res:
                     all_series.extend(res)
+            except ValidationError:
+                raise
             except Exception as e:
                 logger.error(f"Error fetching chunk: {e}")
 
@@ -1109,7 +1203,8 @@ def analyze_period(aoi, start_date, end_date, mode):
 
 def generate_map_url(aoi, start, end, mode, wetland_name=None):
     """Generate absolute URL map paths for RGB, metric tiles, and fast single-image overlays."""
-    BASE_URL = (os.getenv("BACKEND_URL") or os.getenv("RENDER_EXTERNAL_URL") or "https://wetland-monitor-chile.onrender.com").rstrip("/")
+    env_backend = os.getenv("BACKEND_URL") or os.getenv("RENDER_EXTERNAL_URL")
+    BASE_URL = (env_backend or "http://localhost:8000").rstrip("/")
     suffix = f"?wetland={wetland_name}" if wetland_name else ""
     
     overlay_coords = None
@@ -1152,7 +1247,7 @@ def generate_map_url(aoi, start, end, mode, wetland_name=None):
         } if overlay_coords else None
     }
 
-def perform_single_analysis(request: AnalysisRequest, mode):
+def perform_single_analysis(request: AnalysisRequest, mode, token: Optional[str] = None):
     """Perform robust analysis for a single mode."""
     try:
         logger.info(log_process_stage('', mode, 'processing'))
@@ -1160,9 +1255,15 @@ def perform_single_analysis(request: AnalysisRequest, mode):
         aoi = validate_geometry(request.geojson)
         wetland_name = request.wetlandName
         
-        current_data = analyze_period(aoi, request.startDate, request.endDate, mode)
-        if not current_data or len(current_data) < 3:
-            raise ValidationError(f"Insufficient data for {mode}")
+        current_data = analyze_period(aoi, request.startDate, request.endDate, mode, token=token)
+        if not current_data:
+            raise ValidationError(
+                f"Sin observaciones satelitales para {get_index_name(mode)} ({mode}): Con el filtro de 0% de nubosidad, no se detectó ninguna escena Sentinel-2 totalmente despejada entre {request.startDate} y {request.endDate}. Se recomienda ampliar el rango de fechas (ej: varios años o temporada de verano)."
+            )
+        if len(current_data) < 3:
+            raise ValidationError(
+                f"Adquisiciones insuficientes para {get_index_name(mode)} ({mode}): Solo se encontraron {len(current_data)} fecha(s) con 0% de nubosidad entre {request.startDate} y {request.endDate}. Se requieren al menos 3 fechas para estimar medianas y tendencias robustas."
+            )
             
         coverage = validate_temporal_coverage(current_data)
         if not coverage['valid']:
@@ -1174,20 +1275,48 @@ def perform_single_analysis(request: AnalysisRequest, mode):
         
         last_start = (start_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
         last_end = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
-        last_data = analyze_period(aoi, last_start, last_end, mode)
+        last_data = analyze_period(aoi, last_start, last_end, mode, token=token)
         trend_stats = calculate_trend_statistics(current_data_flagged, last_data) or {}
         
-        # Start/End Year Maps and Period Statistics
-        start_year_end = (start_obj + relativedelta(years=1)).strftime("%Y-%m-%d")
-        maps_start = generate_map_url(aoi, request.startDate, start_year_end, mode, wetland_name)
-        end_year_start = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
-        maps_end = generate_map_url(aoi, end_year_start, request.endDate, mode, wetland_name)
+        # Determine actual observed time boundaries from real acquisitions
+        valid_dates = sorted([d['date'] for d in current_data_flagged if d.get('value') is not None])
+        if valid_dates:
+            earliest_date = valid_dates[0]
+            latest_date = valid_dates[-1]
+            earliest_dt = datetime.strptime(earliest_date, "%Y-%m-%d")
+            latest_dt = datetime.strptime(latest_date, "%Y-%m-%d")
+            diff_years = latest_dt.year - earliest_dt.year
+            if diff_years >= 2:
+                s_start = earliest_date
+                s_end = (earliest_dt + relativedelta(years=1)).strftime("%Y-%m-%d")
+                e_start = (latest_dt - relativedelta(years=1)).strftime("%Y-%m-%d")
+                e_end = latest_date
+            else:
+                s_start = earliest_date
+                s_end = latest_date
+                e_start = earliest_date
+                e_end = latest_date
+        else:
+            s_start = request.startDate
+            s_end = (start_obj + relativedelta(years=1)).strftime("%Y-%m-%d")
+            e_start = (end_obj - relativedelta(years=1)).strftime("%Y-%m-%d")
+            e_end = request.endDate
+
+        maps_start = generate_map_url(aoi, s_start, s_end, mode, wetland_name)
+        maps_end = generate_map_url(aoi, e_start, e_end, mode, wetland_name)
         
         # Calculate distinct initial vs final period statistics directly from time series
-        initial_points = [d for d in current_data_flagged if d.get('date', '') <= start_year_end and d.get('value') is not None]
-        final_points = [d for d in current_data_flagged if d.get('date', '') >= end_year_start and d.get('value') is not None]
-        initial_stats = calculate_robust_statistics(initial_points) if len(initial_points) >= 2 else current_stats
-        final_stats = calculate_robust_statistics(final_points) if len(final_points) >= 2 else current_stats
+        initial_points = [d for d in current_data_flagged if d.get('date', '') <= s_end and d.get('value') is not None]
+        final_points = [d for d in current_data_flagged if d.get('date', '') >= e_start and d.get('value') is not None]
+        
+        # If strict 1-year window has fewer than 2 points, dynamically take the earliest available acquisitions
+        if len(initial_points) < 2 and len(current_data_flagged) >= 2:
+            initial_points = current_data_flagged[:max(2, min(len(current_data_flagged), 10))]
+        if len(final_points) < 2 and len(current_data_flagged) >= 2:
+            final_points = current_data_flagged[-max(2, min(len(current_data_flagged), 10)):]
+
+        initial_stats = calculate_robust_statistics(initial_points) or current_stats
+        final_stats = calculate_robust_statistics(final_points) or current_stats
         
         init_med = initial_stats.get('median', current_stats['median'])
         fin_med = final_stats.get('median', current_stats['median'])
@@ -1248,10 +1377,23 @@ def perform_single_analysis(request: AnalysisRequest, mode):
         return create_error_response(e, mode)
 
 @app.post("/analyze")
-async def analyze(request: AnalysisRequest, authorization: str = Header(None)):
-    # Auth validation removed as CDSE will use service credentials
+async def analyze(
+    request: AnalysisRequest, 
+    authorization: Optional[str] = Header(None),
+    x_cdse_username: Optional[str] = Header(None),
+    x_cdse_password: Optional[str] = Header(None),
+    x_cdse_client_id: Optional[str] = Header(None),
+    x_cdse_client_secret: Optional[str] = Header(None)
+):
+    token = get_cdse_token(
+        username=x_cdse_username or "",
+        password=x_cdse_password or "",
+        client_id=x_cdse_client_id or "",
+        client_secret=x_cdse_client_secret or "",
+        bearer_token=authorization or ""
+    )
     try:
-        res = perform_single_analysis(request, request.mode)
+        res = perform_single_analysis(request, request.mode, token=token)
         if not res or 'error' in res: 
             raise HTTPException(500, str(res.get('error', 'Unknown Error')))
             
@@ -1290,7 +1432,7 @@ _cache_lock = threading.Lock()
 _inflight_overlays: Dict[str, threading.Event] = {}
 _MAX_CACHE_SIZE = 3000
 
-def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[float], geometry: Optional[dict] = None) -> Optional[bytes]:
+def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[float], geometry: Optional[dict] = None, token: Optional[str] = None) -> Optional[bytes]:
     """Fetch or retrieve from RAM cache a high-speed BBOX composite PNG.
     If geometry is provided and mode != 'RGB', clips the index to the exact wetland polygon,
     leaving pixels outside the wetland 100% transparent.
@@ -1315,7 +1457,7 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
             return _overlay_cache.get(cache_key)
 
     try:
-        token = get_cdse_token()
+        token = token or get_cdse_token()
         evalscript = get_evalscript(mode, is_process=True)
         
         minx, miny, maxx, maxy = bounds
@@ -1382,8 +1524,8 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
                 timeout=25
             )
 
-        # Fallback 2: if 0% cloud cover returned no scenes, retry with 15%
-        if resp.status_code != 200 or not resp.content or len(resp.content) < 800:
+        # Fallback 2: if 0% cloud cover returned no scenes or returned a blank/empty image, retry with 15%
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 800 or is_blank_image(resp.content):
             payload["input"]["data"][0]["dataFilter"]["maxCloudCoverage"] = 15
             resp = http_session.post(
                 "https://sh.dataspace.copernicus.eu/api/v1/process",
@@ -1392,8 +1534,18 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
                 timeout=25
             )
 
-        # Fallback 3: if still no acquisitions found, relax to leastCC across all available imagery
-        if resp.status_code != 200 or not resp.content or len(resp.content) < 800:
+        # Fallback 3: if still blank or no acquisitions found, retry with 25%
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 800 or is_blank_image(resp.content):
+            payload["input"]["data"][0]["dataFilter"]["maxCloudCoverage"] = 25
+            resp = http_session.post(
+                "https://sh.dataspace.copernicus.eu/api/v1/process",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=25
+            )
+
+        # Fallback 4: if still no acquisitions found, relax to leastCC across all available imagery in window
+        if resp.status_code != 200 or not resp.content or len(resp.content) < 800 or is_blank_image(resp.content):
             payload["input"]["data"][0]["dataFilter"].pop("maxCloudCoverage", None)
             resp = http_session.post(
                 "https://sh.dataspace.copernicus.eu/api/v1/process",
@@ -1402,7 +1554,7 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
                 timeout=25
             )
 
-        if resp.status_code == 200 and resp.content and len(resp.content) >= 800:
+        if resp.status_code == 200 and resp.content and not is_blank_image(resp.content):
             with _cache_lock:
                 if len(_overlay_cache) > _MAX_CACHE_SIZE:
                     keys = list(_overlay_cache.keys())[:int(_MAX_CACHE_SIZE * 0.2)]
@@ -1421,17 +1573,28 @@ def get_overlay_bytes(mode: str, start_date: str, end_date: str, bounds: List[fl
             event.set()
 
 @app.post("/analyze-all")
-async def analyze_all(request: AnalysisRequest, authorization: str = Header(None)):
-    # Check credentials upfront before starting processing
-    if not (CDSE_USERNAME and CDSE_PASSWORD) and not (CDSE_CLIENT_ID and CDSE_CLIENT_SECRET):
-        raise HTTPException(401, detail="Credenciales de Copernicus CDSE no configuradas. Por favor ingresa tus credenciales en el panel lateral.")
+async def analyze_all(
+    request: AnalysisRequest, 
+    authorization: Optional[str] = Header(None),
+    x_cdse_username: Optional[str] = Header(None),
+    x_cdse_password: Optional[str] = Header(None),
+    x_cdse_client_id: Optional[str] = Header(None),
+    x_cdse_client_secret: Optional[str] = Header(None)
+):
+    # Resolve token: client headers have priority, fallback to server institutional credentials
+    token = get_cdse_token(
+        username=x_cdse_username or "",
+        password=x_cdse_password or "",
+        client_id=x_cdse_client_id or "",
+        client_secret=x_cdse_client_secret or "",
+        bearer_token=authorization or ""
+    )
 
     try:
         results = {}
         modes = ["Hydrology", "Vegetation", "WaterQuality", "SoilVegetation", "AlgaeBloom", "WaterRatio"]
         
-        # Concurrent pre-fetch of overlays in background ThreadPool:
-        # Pre-loads RGB + all 6 modes in RAM with geometry clipping so frontend gets them in <5ms
+        # Cache active polygon geometry in RAM for on-demand overlay clipping
         try:
             import shapely.geometry as sg
             aoi_dict = request.geojson.get("geometry") or request.geojson
@@ -1441,31 +1604,27 @@ async def analyze_all(request: AnalysisRequest, authorization: str = Header(None
             _aoi_geometry_cache[bbox_key] = aoi_dict
             if request.wetlandName:
                 _aoi_geometry_cache[request.wetlandName] = aoi_dict
-            
-            end_dt = datetime.strptime(request.endDate[:10], "%Y-%m-%d")
-            ey_start = (end_dt - relativedelta(years=1)).strftime("%Y-%m-%d")
-            
-            prefetch_modes = ["RGB"] + modes
-            def _prefetch_task(m):
-                get_overlay_bytes(m, ey_start, request.endDate, aoi_bounds, geometry=aoi_dict)
-                
-            prefetch_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
-            for m in prefetch_modes:
-                prefetch_executor.submit(_prefetch_task, m)
         except Exception as pfe:
-            logger.warning(f"Could not initialize overlay prefetch: {pfe}")
+            logger.warning(f"Could not cache geometry: {pfe}")
 
         for m in modes:
             logger.info(log_process_stage('', m, 'processing'))
-            results[m] = perform_single_analysis(request, m)
+            results[m] = perform_single_analysis(request, m, token=token)
             
-        # If all modes failed with error status, raise HTTPException so frontend displays error
+        # If all modes failed with error status, raise HTTPException with true cause
         error_modes = [m for m, r in results.items() if isinstance(r, dict) and r.get("status") == "error"]
         if len(error_modes) == len(modes):
             first_err = results[modes[0]].get("error", "Error desconocido al procesar datos satelitales")
             logger.error(f"All modes failed in analyze-all: {first_err}")
-            if "credentials" in str(first_err).lower() or "credenciales" in str(first_err).lower():
-                raise HTTPException(401, detail=f"Error de credenciales CDSE: {first_err}")
+            err_lower = str(first_err).lower()
+            if "credentials" in err_lower or "credenciales" in err_lower or "401" in err_lower or "unauthorized" in err_lower:
+                raise HTTPException(401, detail=f"{first_err}")
+            if "cuota" in err_lower or "processing units" in err_lower or "unidades de procesamiento" in err_lower or "403" in err_lower:
+                raise HTTPException(403, detail=f"{first_err}")
+            if "rate limit" in err_lower or "límite de tasa" in err_lower or "429" in err_lower:
+                raise HTTPException(429, detail=f"{first_err}")
+            if "sin observaciones" in err_lower or "adquisiciones insuficientes" in err_lower or "insufficient data" in err_lower:
+                raise HTTPException(422, detail=f"{first_err}")
             raise HTTPException(500, detail=f"Error en procesamiento satelital: {first_err}")
 
         logger.info(log_process_stage('', None, 'final'))
@@ -1712,51 +1871,58 @@ async def verify_credentials(payload: dict):
 
 @app.post("/set-credentials")
 async def set_credentials(payload: dict):
-    """Set CDSE credentials at runtime. Accepts either:  
-    - {username, password} for standard Copernicus accounts  
-    - {client_id, client_secret} for OAuth service accounts
-    """
-    global CDSE_USERNAME, CDSE_PASSWORD, CDSE_CLIENT_ID, CDSE_CLIENT_SECRET
-    
+    """Verify CDSE credentials at runtime and return status/token without saving to global state."""
     username = payload.get("username", "").strip()
     password = payload.get("password", "").strip()
     client_id = payload.get("client_id", "").strip()
     client_secret = payload.get("client_secret", "").strip()
     
-    if username and password:
-        CDSE_USERNAME = username
-        CDSE_PASSWORD = password
-        CDSE_CLIENT_ID = ""
-        CDSE_CLIENT_SECRET = ""
-    elif client_id and client_secret:
-        CDSE_CLIENT_ID = client_id
-        CDSE_CLIENT_SECRET = client_secret
-        CDSE_USERNAME = ""
-        CDSE_PASSWORD = ""
-    else:
-        raise HTTPException(400, "Provide either {username + password} or {client_id + client_secret}")
-    
-    invalidate_cdse_token()
-    
-    # Verify credentials work
-    try:
-        get_cdse_token()
-        _save_persisted_credentials()
-    except Exception as e:
-        CDSE_USERNAME = ""
-        CDSE_PASSWORD = ""
-        CDSE_CLIENT_ID = ""
-        CDSE_CLIENT_SECRET = ""
-        _save_persisted_credentials()
-        raise HTTPException(401, f"Fallo de autenticación con Copernicus: {e}")
-    return {"status": "ok", "message": "Acceso a Copernicus verificado y activado con éxito"}
+    # Test token retrieval (populates user token cache)
+    token = get_cdse_token(
+        username=username,
+        password=password,
+        client_id=client_id,
+        client_secret=client_secret
+    )
+    return {
+        "status": "ok",
+        "message": "Credenciales CDSE verificadas y activadas para esta sesión",
+        "token": token
+    }
+
+@app.post("/clear-credentials")
+async def clear_credentials():
+    """Clear active user credentials and token cache for switching accounts."""
+    global _last_active_token
+    with _cdse_token_lock:
+        _last_active_token = None
+        _cdse_token_cache.clear()
+    return {"status": "ok", "message": "Credenciales y sesión desconectadas exitosamente"}
 
 @app.get("/credentials-status")
 async def credentials_status():
-    """Check whether CDSE credentials are configured."""
-    has_password = bool(CDSE_USERNAME and CDSE_PASSWORD)
-    has_oauth = bool(CDSE_CLIENT_ID and CDSE_CLIENT_SECRET)
-    return {"configured": has_password or has_oauth, "method": "password" if has_password else ("oauth" if has_oauth else "none")}
+    """Check whether CDSE institutional credentials or an active session are configured."""
+    server_ready = is_server_configured()
+    with _cdse_token_lock:
+        has_session = bool(_last_active_token and time.time() < (_last_active_token.get("expires_at", 0) - 10))
+    
+    is_active = server_ready or has_session
+    return {
+        "configured": is_active,
+        "server_configured": server_ready,
+        "has_active_session": has_session,
+        "mode": "institutional" if server_ready else ("session" if has_session else "byoc"),
+        "method": "password" if CDSE_SERVER_USERNAME else ("oauth" if CDSE_SERVER_CLIENT_ID else "byoc"),
+        "message": "Servidor con credenciales institucionales activas" if server_ready else ("Sesión de usuario activa" if has_session else "Modo público BYOC (requiere credenciales del usuario)")
+    }
+
+@app.get("/api/wetland/{name_or_code}/geometry")
+async def get_wetland_geom(name_or_code: str):
+    """Retrieve detailed GeoJSON polygon geometry on-demand for a single wetland."""
+    geom = get_wetland_geometry(name_or_code)
+    if not geom:
+        raise HTTPException(404, detail=f"Geometría no encontrada para el humedal '{name_or_code}'")
+    return {"status": "ok", "name": name_or_code, "geometry": geom}
 
 @app.post("/parse-geometry")
 async def parse_geometry(file: UploadFile):
@@ -1829,7 +1995,14 @@ async def parse_geometry(file: UploadFile):
         raise HTTPException(500, f"Failed to parse geometry: {e}")
 
 @app.post("/generate-report")
-async def generate_report(request: dict):
+async def generate_report(
+    request: dict,
+    authorization: Optional[str] = Header(None),
+    x_cdse_username: Optional[str] = Header(None),
+    x_cdse_password: Optional[str] = Header(None),
+    x_cdse_client_id: Optional[str] = Header(None),
+    x_cdse_client_secret: Optional[str] = Header(None)
+):
     try:
         wetland_name = request.get('wetland_name', 'Humedal Desconocido')
         wetland_metadata = request.get('wetland_metadata', {})
@@ -1837,6 +2010,14 @@ async def generate_report(request: dict):
         start_date = request.get('start_date', '')
         end_date = request.get('end_date', '')
         
+        token = get_cdse_token(
+            username=x_cdse_username or "",
+            password=x_cdse_password or "",
+            client_id=x_cdse_client_id or "",
+            client_secret=x_cdse_client_secret or "",
+            bearer_token=authorization or ""
+        )
+
         # Run report generation in worker thread to prevent event loop blocking
         doc_buffer = await asyncio.to_thread(
             generate_wetland_report,
@@ -1844,7 +2025,8 @@ async def generate_report(request: dict):
             wetland_metadata,
             analysis_results,
             start_date,
-            end_date
+            end_date,
+            token
         )
         filename = f"Reporte_{wetland_name.replace(' ', '_')}_{end_date}.docx"
         

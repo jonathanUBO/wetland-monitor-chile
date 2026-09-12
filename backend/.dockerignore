@@ -4,4 +4,8 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+.env*
 wetland_analysis.log
+*.log
+*_storage.json
+_cdse_storage.json

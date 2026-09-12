@@ -1,0 +1,33 @@
+# Git & IDE
+.git/
+.gitignore
+.vscode/
+.gemini/
+brain/
+scratch/
+
+# Node Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.env
+frontend/.env.local
+frontend/npm-debug.log*
+
+# Python Backend
+backend/venv/
+backend/.env
+backend/.env*
+**/__pycache__/
+*.py[cod]
+*$py.class
+backend/logs/
+*_storage.json
+_cdse_storage.json
+
+# Documentation and temporary logs
+*.docx
+*.log
+wetland_analysis.log
+temp/

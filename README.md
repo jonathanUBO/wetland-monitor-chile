@@ -2,7 +2,9 @@
 
 **Wetland Monitor** es una plataforma avanzada de análisis geoespacial para el monitoreo y evaluación de humedales en Chile. Utiliza imágenes satelitales **Sentinel-2 (L2A)** directamente desde **Copernicus Data Space Ecosystem (CDSE)** —el sucesor oficial de *Copernicus Open Access Hub (SciHub)* de la Agencia Espacial Europea (ESA)— para calcular índices espectrales críticos para la conservación y salud de los ecosistemas.
 
-![Screenshot](frontend/public/screenshot.png)
+<p align="center">
+  <img src="assets/screenshot.png" alt="Wetland Monitor Chile Dashboard - Análisis Multi-Espectral Sentinel-2" width="100%">
+</p>
 
 ## 🚀 Características Principales
 

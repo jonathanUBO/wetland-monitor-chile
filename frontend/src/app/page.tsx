@@ -19,7 +19,9 @@ import {
     CheckCircle2,
     LogOut,
     Key,
-    User
+    User,
+    X,
+    FileText
 } from 'lucide-react';
 import {
     XAxis,
@@ -34,585 +36,31 @@ import {
 } from 'recharts';
 import axios from 'axios';
 
-// Helper — dynamically resolve API URL (prioritizes Render backend in production/Vercel)
-const getApiUrl = (): string => {
-    const envUrl = process.env.NEXT_PUBLIC_API_URL;
-    if (envUrl && !envUrl.includes('tu-backend.railway.app') && !envUrl.includes('localhost')) {
-        return envUrl.replace(/\/$/, '');
-    }
-    if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-        return 'https://wetland-monitor-chile.onrender.com';
-    }
-    return (envUrl || 'http://localhost:8000').replace(/\/$/, '');
-};
+import {
+    getApiUrl,
+    resolveBackendUrl,
+    CHILEAN_REGIONS,
+    ConsolidatedStatus,
+    ModeResult,
+    GlassPanel,
+    getOptimalZoom,
+    getBoundsFromGeometry,
+    resampleToMonthly,
+    METRIC_NAMES,
+    mergeTimeSeries,
+    LEGENDS,
+} from '../lib/wetland';
+import { IndexCard } from '../components/IndexCard';
 
-// --- CHILEAN ADMINISTRATIVE REGIONS (North to South) ---
-const CHILEAN_REGIONS = [
-    "Arica y Parinacota",
-    "Tarapacá",
-    "Antofagasta",
-    "Atacama",
-    "Coquimbo",
-    "Valparaíso",
-    "Metropolitana",
-    "O'Higgins",
-    "Maule",
-    "Ñuble",
-    "Biobío",
-    "La Araucanía",
-    "Los Ríos",
-    "Los Lagos",
-    "Aysén",
-    "Magallanes"
-];
-
-// --- TYPES ---
-interface TimeSeriesPoint {
-    date: string;
-    value: number;
-    metric_name: string;
-    is_outlier?: boolean;  // Flag for outlier detection
-}
-
-interface ModeResult {
-    mode: string;
-    stats: {
-        current: number;
-        current_mean?: number;
-        current_std?: number;
-        current_min?: number;
-        current_max?: number;
-        initial?: number;
-        initial_mean?: number;
-        initial_std?: number;
-        last: number;
-        trend: number;
-        trend_delta?: number;
-        sen_slope?: number;
-        outlier_count?: number;
-        data_count?: number;
-        cv?: number;  // Coefficient of variation
-    };
-    time_series: TimeSeriesPoint[];
-    maps: {
-        rgb: string;
-        metric: string;
-        start_year?: { rgb: string; metric: string; overlay?: any };
-        end_year?: { rgb: string; metric: string; overlay?: any };
-        overlay?: {
-            rgb_url: string;
-            metric_url: string;
-            coordinates: [[number, number], [number, number], [number, number], [number, number]];
-        };
-        thumb_url?: string;
-    };
-    coverage?: {
-        valid: boolean;
-        coverage_days: number;
-        data_points: number;
-        start_date: string;
-        end_date: string;
-        reason?: string;
-    };
-}
-
-const GlassPanel = ({ children, className = "", id }: { children?: React.ReactNode, className?: string, id?: string }) => (
-    <div id={id} className={`bg-gray-900/60 backdrop-blur-xl border border-white/10 rounded-2xl ${className}`}>
-        {children}
-    </div>
-);
-
-// Helper — calculate optimal balanced zoom to fit bounds [minX, minY, maxX, maxY] with generous breathing room
-const getOptimalZoom = (
-    bounds: [number, number, number, number],
-    mapWidth = 420,
-    mapHeight = 280,
-    paddingX = 110,
-    paddingY = 85
-): number => {
-    const [minX, minY, maxX, maxY] = bounds;
-    const lonDiff = Math.max(0.0001, Math.abs(maxX - minX));
-    const latDiff = Math.max(0.0001, Math.abs(maxY - minY));
-
-    const adjustedWidth = Math.max(60, mapWidth - paddingX * 2);
-    const adjustedHeight = Math.max(50, mapHeight - paddingY * 2);
-
-    // Mercator projection math
-    const lat1 = (minY * Math.PI) / 180;
-    const lat2 = (maxY * Math.PI) / 180;
-    const merc1 = Math.log(Math.tan(Math.PI / 4 + lat1 / 2));
-    const merc2 = Math.log(Math.tan(Math.PI / 4 + lat2 / 2));
-    const yDiff = Math.max(0.0001, Math.abs(merc2 - merc1));
-
-    const zoomX = Math.log2((adjustedWidth / 256) * (360 / lonDiff));
-    const zoomY = Math.log2((adjustedHeight / 256) * ((2 * Math.PI) / yDiff));
-
-    // Balanced zoom: leaves ~50% context around the wetland so it does not feel giant or touch UI borders
-    const optimalZoom = Math.min(zoomX, zoomY) - 0.35;
-    return Math.max(4, Math.min(15.5, Number(optimalZoom.toFixed(1))));
-};
-
-// Helper — extract bounding box [minX, minY, maxX, maxY] from any GeoJSON geometry
-const getBoundsFromGeometry = (geometry: any): [number, number, number, number] | null => {
-    if (!geometry) return null;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
-    const extractCoords = (coords: any) => {
-        if (!Array.isArray(coords)) return;
-        if (coords.length >= 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') {
-            const [x, y] = coords;
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-        } else {
-            coords.forEach(extractCoords);
-        }
-    };
-
-    if (geometry.coordinates) {
-        extractCoords(geometry.coordinates);
-    }
-    if (minX !== Infinity && maxX !== -Infinity && minY !== Infinity && maxY !== -Infinity) {
-        return [minX, minY, maxX, maxY];
-    }
-    return null;
-};
-
-// Helper — resample sorted daily points to monthly averages
-const resampleToMonthly = (dailyData: any[]): any[] => {
-    const months: Record<string, { points: any[]; keys: Set<string> }> = {};
-    dailyData.forEach(pt => {
-        const month = pt.date.substring(0, 7); // YYYY-MM
-        if (!months[month]) months[month] = { points: [], keys: new Set() };
-        months[month].points.push(pt);
-        Object.keys(pt).forEach(k => k !== 'date' && months[month].keys.add(k));
-    });
-
-    return Object.entries(months)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([month, { points, keys }]) => {
-            const agg: any = { date: month };
-            keys.forEach(key => {
-                if (key.endsWith('_outlier')) {
-                    agg[key] = points.some(p => p[key]);
-                } else {
-                    const vals = points.map(p => p[key]).filter(v => v !== null && v !== undefined && !isNaN(v));
-                    agg[key] = vals.length > 0 ? Number((vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(3)) : null;
-                }
-            });
-            return agg;
-        });
-};
-
-const METRIC_NAMES: Record<string, string> = {
-    Hydrology: 'MNDWI (Hidrología)',
-    Vegetation: 'NDRE (Vegetación)',
-    WaterQuality: 'NDCI (Calidad Agua)',
-    SoilVegetation: 'SAVI (Veg./Suelo)',
-    AlgaeBloom: 'FAI (Algas)',
-    WaterRatio: 'WRI (Ratio Agua)'
-};
-
-// Helper for merging time series
-const mergeTimeSeries = (results: Record<string, ModeResult>) => {
-    // Collect all dates
-    const allDates = new Set<string>();
-    Object.values(results).forEach(r => {
-        if (r && r.time_series) {
-            r.time_series.forEach(p => allDates.add(p.date));
-        }
-    });
-
-    const sortedDates = Array.from(allDates).sort();
-
-    return sortedDates.map(date => {
-        const point: any = { date };
-
-        // Hydrology (MNDWI)
-        const hydroPoint = results['Hydrology']?.time_series.find(p => p.date === date);
-        point.Hydrology = hydroPoint != null && typeof hydroPoint.value === 'number' ? Number(hydroPoint.value.toFixed(3)) : null;
-        point.Hydrology_outlier = hydroPoint?.is_outlier || false;
-
-        // Vegetation (NDRE)
-        const vegPoint = results['Vegetation']?.time_series.find(p => p.date === date);
-        point.Vegetation = vegPoint != null && typeof vegPoint.value === 'number' ? Number(vegPoint.value.toFixed(3)) : null;
-        point.Vegetation_outlier = vegPoint?.is_outlier || false;
-
-        // WaterQuality (NDCI)
-        const qualPoint = results['WaterQuality']?.time_series.find(p => p.date === date);
-        point.WaterQuality = qualPoint != null && typeof qualPoint.value === 'number' ? Number(qualPoint.value.toFixed(3)) : null;
-        point.WaterQuality_outlier = qualPoint?.is_outlier || false;
-
-        // SoilVegetation (SAVI)
-        const saviPoint = results['SoilVegetation']?.time_series.find(p => p.date === date);
-        point.SoilVegetation = saviPoint != null && typeof saviPoint.value === 'number' ? Number(saviPoint.value.toFixed(3)) : null;
-        point.SoilVegetation_outlier = saviPoint?.is_outlier || false;
-
-        // AlgaeBloom (FAI)
-        const faiPoint = results['AlgaeBloom']?.time_series.find(p => p.date === date);
-        point.AlgaeBloom = faiPoint != null && typeof faiPoint.value === 'number' ? Number(faiPoint.value.toFixed(3)) : null;
-        point.AlgaeBloom_outlier = faiPoint?.is_outlier || false;
-
-        // WaterRatio (WRI)
-        const wriPoint = results['WaterRatio']?.time_series.find(p => p.date === date);
-        point.WaterRatio = wriPoint != null && typeof wriPoint.value === 'number' ? Number(wriPoint.value.toFixed(3)) : null;
-        point.WaterRatio_outlier = wriPoint?.is_outlier || false;
-
-        return point;
-    });
-};
-
-const LEGENDS: any = {
-    Hydrology: {
-        gradient: 'linear-gradient(to right, red, white, blue)',
-        labels: ['-1', '0', '+1'],
-        descriptions: ['Seco/Tierra', 'Humedad', 'Agua Profunda'],
-        title: 'MNDWI (Humedad)'
-    },
-    Vegetation: {
-        gradient: 'linear-gradient(to right, red, yellow, green)',
-        labels: ['0', '0.4', '0.8'],
-        descriptions: ['Suelo Desnudo', 'Veg. Baja', 'Veg. Densa'],
-        title: 'NDRE (Clorofila)'
-    },
-    WaterQuality: {
-        gradient: 'linear-gradient(to right, blue, cyan, lime, yellow, red)',
-        labels: ['-0.1', '0.2', '0.5'],
-        descriptions: ['Baja Turb.', 'Media', 'Alta Turb.'],
-        title: 'NDCI (Turbidez)'
-    },
-    SoilVegetation: {
-        gradient: 'linear-gradient(to right, #8B4513, #FFD700, #90EE90, #006400)',
-        labels: ['-0.5', '0', '0.8'],
-        descriptions: ['Suelo', 'Veg. Dispersa', 'Veg. Densa'],
-        title: 'SAVI (Veg./Suelo)'
-    },
-    AlgaeBloom: {
-        gradient: 'linear-gradient(to right, #0000FF, #00FFFF, #FFFF00, #FF0000)',
-        labels: ['-0.1', '0.2', '0.5'],
-        descriptions: ['Sin Algas', 'Presencia', 'Bloom'],
-        title: 'FAI (Algas)'
-    },
-    WaterRatio: {
-        gradient: 'linear-gradient(to right, #FF0000, #FFA500, #FFFFFF, #00FFFF, #0000FF)',
-        labels: ['-1', '0', '+1'],
-        descriptions: ['Tierra (<0.1)', 'Mixto (1.0)', 'Agua (>10)'],
-        title: 'WRI (Log Scan)'
-    }
-};
-
-// SATELLITE BASEMAP STYLE (High-Resolution Global Imagery via ESRI)
-const SATELLITE_MAP_STYLE: any = {
-    version: 8,
-    sources: {
-        'esri-satellite': {
-            type: 'raster',
-            tiles: [
-                'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
-            ],
-            tileSize: 256,
-            maxzoom: 19,
-            attribution: 'Esri, Maxar, Earthstar Geographics'
-        }
-    },
-    layers: [
-        {
-            id: 'esri-satellite-layer',
-            type: 'raster',
-            source: 'esri-satellite',
-            minzoom: 0,
-            maxzoom: 19
-        }
-    ]
-};
-
-interface IndexCardProps {
-    key?: string | number;
-    mode: any;
-    res: ModeResult | undefined;
-    legend: any;
-    viewState: any;
-    onMove: (evt: any) => void;
-    viewYear: 'start' | 'end';
-    boundaryGeometry?: any;
-    mapMode?: 'satellite' | 'dark';
-}
-
-const IndexCard = ({ mode, res, legend, viewState, onMove, viewYear, boundaryGeometry, mapMode = 'satellite' }: IndexCardProps) => {
-
-    // Memoize the GeoJSON FeatureCollection for the wetland perimeter
-    const boundaryGeoJson = React.useMemo(() => {
-        if (!boundaryGeometry) return null;
-        return {
-            type: 'FeatureCollection' as const,
-            features: [
-                {
-                    type: 'Feature' as const,
-                    geometry: boundaryGeometry,
-                    properties: {}
-                }
-            ]
-        };
-    }, [boundaryGeometry]);
-
-    // Fast Single-Image Overlay (BBOX composite, instant load)
-    let overlayData = res?.maps?.overlay;
-    let rgbTile = res?.maps?.rgb;
-    let metricTile = res?.maps?.metric;
-
-    // If backend provided specific year maps
-    if (viewYear === 'start' && res?.maps?.start_year) {
-        overlayData = res.maps.start_year.overlay || overlayData;
-        rgbTile = res.maps.start_year.rgb;
-        metricTile = res.maps.start_year.metric;
-    } else if (viewYear === 'end' && res?.maps?.end_year) {
-        overlayData = res.maps.end_year.overlay || overlayData;
-        rgbTile = res.maps.end_year.rgb;
-        metricTile = res.maps.end_year.metric;
-    }
-
-    const mapRef = useRef<any>(null);
-
-    // Bring boundary line layers to the absolute top of the MapLibre layer stack
-    const bringBoundaryToFront = useCallback(() => {
-        try {
-            const map = mapRef.current?.getMap ? mapRef.current.getMap() : mapRef.current;
-            if (!map || !map.getStyle) return;
-            const style = map.getStyle();
-            if (!style || !style.layers) return;
-            const layers = style.layers;
-            const haloId = `boundary-line-halo-${mode.id}`;
-            const lineId = `boundary-line-${mode.id}`;
-            const lastLayerId = layers[layers.length - 1]?.id;
-
-            // If already the topmost layer, nothing to do
-            if (lastLayerId === lineId) return;
-
-            if (map.getLayer(haloId)) {
-                map.moveLayer(haloId);
-            }
-            if (map.getLayer(lineId)) {
-                map.moveLayer(lineId);
-            }
-        } catch {
-            // style loading or layer not yet added
-        }
-    }, [mode.id]);
-
-    useEffect(() => {
-        const t1 = setTimeout(bringBoundaryToFront, 100);
-        const t2 = setTimeout(bringBoundaryToFront, 400);
-        return () => {
-            clearTimeout(t1);
-            clearTimeout(t2);
-        };
-    }, [overlayData, rgbTile, metricTile, viewYear, boundaryGeoJson, bringBoundaryToFront]);
-
-    return (
-        <div key={mode.id} className={`bg-black/40 border ${mode.border} rounded-2xl flex flex-col relative overflow-hidden group hover:border-white/20 transition-all`}>
-            {/* COMPACT HEADER */}
-            <div className="p-2.5 z-10 bg-gradient-to-b from-black/85 via-black/40 to-transparent flex flex-col gap-0.5 pointer-events-none">
-                <div className="flex items-center justify-between w-full">
-                    <div className="flex items-center gap-1.5">
-                        <mode.icon className={`w-3.5 h-3.5 ${mode.color}`} />
-                        <span className="text-xs font-bold tracking-wider text-gray-200">
-                            {mode.title} <span className="text-gray-400 font-normal text-[10px]">({mode.acronym})</span>
-                        </span>
-                    </div>
-
-                    {/* Absolute Median Change (Delta) badge top-right */}
-                    {res?.stats?.trend != null && (
-                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md backdrop-blur-md border font-bold shadow-sm ${
-                            res.stats.trend >= 0
-                                ? 'bg-green-500/15 text-green-400 border-green-500/30'
-                                : 'bg-red-500/15 text-red-400 border-red-500/30'
-                        }`} title={`Cambio absoluto interanual (Δ mediana): ${res.stats.trend >= 0 ? '+' : ''}${res.stats.trend.toFixed(3)}`}>
-                            Δ {res.stats.trend >= 0 ? '+' : ''}{res.stats.trend.toFixed(3)}
-                        </span>
-                    )}
-                </div>
-
-                <div className="flex items-baseline gap-2.5 mt-0.5">
-                    <span className="text-2xl font-mono font-bold text-white drop-shadow-md">
-                        {viewYear === 'start'
-                            ? (res?.stats?.initial != null ? res.stats.initial.toFixed(3) : (res?.stats?.current != null ? res.stats.current.toFixed(3) : '---'))
-                            : (res?.stats?.current != null ? res.stats.current.toFixed(3) : '---')}
-                    </span>
-
-                    {/* Robust Statistics Inline */}
-                    {res?.stats && (
-                        <div className="flex items-center gap-2 text-[10px] text-gray-400 font-mono">
-                            {viewYear === 'start' ? (
-                                (res.stats.initial_std != null || res.stats.current_std != null) && (
-                                    <span><span className="text-gray-500">σ:</span> ±{(res.stats.initial_std ?? res.stats.current_std)?.toFixed(3)}</span>
-                                )
-                            ) : (
-                                res.stats.current_std != null && (
-                                    <span><span className="text-gray-500">σ:</span> ±{res.stats.current_std.toFixed(3)}</span>
-                                )
-                            )}
-                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-gray-400 uppercase font-semibold">
-                                {viewYear === 'start' ? 'Inicial' : 'Final'}
-                            </span>
-                            {res.stats.cv != null && (
-                                <span><span className="text-gray-500">CV:</span> {res.stats.cv.toFixed(1)}%</span>
-                            )}
-                            {res.stats.outlier_count != null && res.stats.outlier_count > 0 && (
-                                <span className="text-yellow-400 bg-yellow-400/10 px-1.5 py-0.2 rounded-full border border-yellow-400/20 text-[9px]">
-                                    ⚠ {res.stats.outlier_count}
-                                </span>
-                            )}
-                        </div>
-                    )}
-                </div>
-            </div>
-
-            {/* MAP BACKGROUND */}
-            <div className="absolute inset-0 z-0">
-                <Map
-                    ref={mapRef}
-                    {...viewState}
-                    onMove={onMove}
-                    mapLib={maplibregl as any}
-                    style={{ width: '100%', height: '100%' }}
-                    mapStyle={mapMode === 'dark' ? "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" : SATELLITE_MAP_STYLE}
-                    attributionControl={false}
-                    reuseMaps={true}
-                    onIdle={bringBoundaryToFront}
-                >
-                    {/* 1. FAST SINGLE-IMAGE OVERLAYS (INSTANT LOAD) */}
-                    {res && overlayData?.coordinates && (
-                        <React.Fragment key={`overlay-${mode.id}-${viewYear}`}>
-                            {overlayData.rgb_url && (
-                                <Source
-                                    key={`src-ov-rgb-${mode.id}-${viewYear}-${overlayData.rgb_url}`}
-                                    id={`${mode.id}-ov-rgb`}
-                                    type="image"
-                                    url={overlayData.rgb_url}
-                                    coordinates={overlayData.coordinates}
-                                >
-                                    <Layer
-                                        id={`${mode.id}-ov-rgb-layer`}
-                                        type="raster"
-                                        paint={{ 'raster-opacity': 0.65 }}
-                                    />
-                                </Source>
-                            )}
-                            {overlayData.metric_url && (
-                                <Source
-                                    key={`src-ov-metric-${mode.id}-${viewYear}-${overlayData.metric_url}`}
-                                    id={`${mode.id}-ov-metric`}
-                                    type="image"
-                                    url={overlayData.metric_url}
-                                    coordinates={overlayData.coordinates}
-                                >
-                                    <Layer
-                                        id={`${mode.id}-ov-metric-layer`}
-                                        type="raster"
-                                        paint={{ 'raster-opacity': 0.85 }}
-                                    />
-                                </Source>
-                            )}
-                        </React.Fragment>
-                    )}
-
-                    {/* 2. SLIPPY TILE RASTER LAYERS (FALLBACK OR COMPLEMENT) */}
-                    {res && (!overlayData?.coordinates) && rgbTile && metricTile && (
-                        <React.Fragment key={`tiles-${mode.id}-${viewYear}`}>
-                            <Source
-                                key={`src-rgb-${mode.id}-${viewYear}-${rgbTile}`}
-                                id={`${mode.id}-rgb`}
-                                type="raster"
-                                tiles={[rgbTile]}
-                                tileSize={256}
-                            >
-                                <Layer
-                                    id={`${mode.id}-rgb-layer`}
-                                    type="raster"
-                                    paint={{ 'raster-opacity': 0.6 }}
-                                />
-                            </Source>
-                            <Source
-                                key={`src-metric-${mode.id}-${viewYear}-${metricTile}`}
-                                id={`${mode.id}-metric`}
-                                type="raster"
-                                tiles={[metricTile]}
-                                tileSize={256}
-                            >
-                                <Layer
-                                    id={`${mode.id}-metric-layer`}
-                                    type="raster"
-                                    paint={{}}
-                                />
-                            </Source>
-                        </React.Fragment>
-                    )}
-
-                    {/* 3. WETLAND BOUNDARY VECTOR OVERLAY - ALWAYS ON TOP, UNFILLED, CRISP THIN LINE */}
-                    {boundaryGeoJson && (
-                        <Source
-                            key={`boundary-src-${mode.id}-${res ? 'res' : 'no'}-${viewYear}-${overlayData?.rgb_url ? 'ov' : 'tile'}`}
-                            id={`boundary-src-${mode.id}`}
-                            type="geojson"
-                            data={boundaryGeoJson}
-                        >
-                            <Layer
-                                id={`boundary-line-halo-${mode.id}`}
-                                type="line"
-                                paint={{
-                                    'line-color': '#000000',
-                                    'line-width': 2.2,
-                                    'line-opacity': 0.85
-                                }}
-                            />
-                            <Layer
-                                id={`boundary-line-${mode.id}`}
-                                type="line"
-                                paint={{
-                                    'line-color': '#00f5ff',
-                                    'line-width': 1.3,
-                                    'line-opacity': 1.0
-                                }}
-                            />
-                        </Source>
-                    )}
-                </Map>
-            </div>
-
-            {/* LEGEND OVERLAY */}
-            <div className="absolute bottom-2 left-2 right-2 z-10 pointer-events-none">
-                <GlassPanel className="p-1.5 backdrop-blur-md bg-black/60 !rounded-lg border-white/5">
-                    <div className="flex justify-between text-[8px] text-gray-300 uppercase font-bold mb-0.5">
-                        <span>{legend.labels[0]}</span>
-                        <span>{legend.title}</span>
-                        <span>{legend.labels[2]}</span>
-                    </div>
-                    <div className="h-1.5 w-full rounded-full mb-0.5" style={{ background: legend.gradient }} />
-                    <div className="flex justify-between text-[7px] text-gray-400 font-medium">
-                        <span>{legend.descriptions[0]}</span>
-                        <span>{legend.descriptions[1]}</span>
-                        <span>{legend.descriptions[2]}</span>
-                    </div>
-                </GlassPanel>
-            </div>
-
-            {/* CLEAN STATUS BADGE (DOES NOT OBSTRUCT MAP OR BOUNDARY) */}
-            {!res && (
-                <div className="absolute top-14 left-2.5 z-10 pointer-events-none flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-md border border-cyan-500/30 text-[9px] font-mono text-cyan-300 shadow-md">
-                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                    <span>{boundaryGeometry ? 'Perímetro Delimitado' : 'Esperando Selección'}</span>
-                </div>
-            )}
-        </div>
-    );
-};
 
 export default function Dashboard() {
     // --- STATE ---
     const [loading, setLoading] = useState(false);
     const [generatingReport, setGeneratingReport] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [sarLoading, setSarLoading] = useState(false);
+    const [sarData, setSarData] = useState<any | null>(null);
+    const [sarError, setSarError] = useState<string | null>(null);
 
     // Auth (Simplified for CDSE backend)
     const [isApiReady, setIsApiReady] = useState(true);
@@ -623,6 +71,15 @@ export default function Dashboard() {
     const [results, setResults] = useState<Record<string, ModeResult> | null>(null);
     const [mergedData, setMergedData] = useState<any[]>([]);
     const [processLog, setProcessLog] = useState<string[]>([]);
+    const [showDiagnosisModal, setShowDiagnosisModal] = useState(false);
+
+    // Consolidated Ecological Condition (WECI)
+    const consolidatedStatus: ConsolidatedStatus | null = React.useMemo(() => {
+        if (!results) return null;
+        if ((results as any).consolidated_status) return (results as any).consolidated_status;
+        if ((results as any)._consolidated) return (results as any)._consolidated;
+        return null;
+    }, [results]);
 
     // Global View State (Start vs End Year)
     const [viewYear, setViewYear] = useState<'start' | 'end'>('end');
@@ -641,16 +98,22 @@ export default function Dashboard() {
     const [wetlands, setWetlands] = useState<any[]>([]);
     const [filteredWetlands, setFilteredWetlands] = useState<any[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
+    const deferredSearchQuery = React.useDeferredValue(searchQuery);
     const [selectedRegion, setSelectedRegion] = useState<string>('');
     const [selectedWetland, setSelectedWetland] = useState<any | null>(null);
     const [showSuggestions, setShowSuggestions] = useState(false);
 
+    // Instant local memory cache for analysis results (<10ms reload)
+    const localAnalysisCache = useRef<Record<string, any>>({});
+    const analysisAbortController = useRef<AbortController | null>(null);
+
     // CDSE Credentials - Supports Any Account (Email/Password or OAuth2 Client ID/Secret)
+    const [cdseToken, setCdseToken] = useState<string>('');
     const [cdseAuthMode, setCdseAuthMode] = useState<'password' | 'oauth'>('password');
     const [cdseUsername, setCdseUsername] = useState(() => {
         if (typeof window !== 'undefined') {
             try {
-                const saved = localStorage.getItem('cdse_credentials');
+                const saved = sessionStorage.getItem('cdse_credentials') || localStorage.getItem('cdse_credentials');
                 if (saved) return JSON.parse(saved).username || '';
             } catch {}
         }
@@ -659,7 +122,7 @@ export default function Dashboard() {
     const [cdsePassword, setCdsePassword] = useState(() => {
         if (typeof window !== 'undefined') {
             try {
-                const saved = localStorage.getItem('cdse_credentials');
+                const saved = sessionStorage.getItem('cdse_credentials') || localStorage.getItem('cdse_credentials');
                 if (saved) return JSON.parse(saved).password || '';
             } catch {}
         }
@@ -668,7 +131,7 @@ export default function Dashboard() {
     const [cdseClientId, setCdseClientId] = useState(() => {
         if (typeof window !== 'undefined') {
             try {
-                const saved = localStorage.getItem('cdse_credentials');
+                const saved = sessionStorage.getItem('cdse_credentials') || localStorage.getItem('cdse_credentials');
                 if (saved) return JSON.parse(saved).clientId || '';
             } catch {}
         }
@@ -677,7 +140,7 @@ export default function Dashboard() {
     const [cdseClientSecret, setCdseClientSecret] = useState(() => {
         if (typeof window !== 'undefined') {
             try {
-                const saved = localStorage.getItem('cdse_credentials');
+                const saved = sessionStorage.getItem('cdse_credentials') || localStorage.getItem('cdse_credentials');
                 if (saved) return JSON.parse(saved).clientSecret || '';
             } catch {}
         }
@@ -708,15 +171,34 @@ export default function Dashboard() {
         }
     }, []);
 
+    const handleMapMove = useCallback((evt: any) => {
+        setViewState(evt.viewState);
+    }, []);
+
     // --- EFFECTS ---
     useEffect(() => {
-        fetch('/wetlands.json')
+        // Restore local analysis cache from sessionStorage for instantaneous (<10ms) renders
+        if (typeof window !== 'undefined') {
+            try {
+                const cached = sessionStorage.getItem('wetland_v2_analysis_cache');
+                if (cached) {
+                    localAnalysisCache.current = JSON.parse(cached);
+                }
+            } catch {}
+        }
+
+        const API = getApiUrl();
+        // Load lightweight wetlands metadata (~150KB vs 23MB); polygon geometry is fetched on-demand
+        fetch(`${API}/api/wetlands`)
             .then(res => res.json())
-            .then(setWetlands)
+            .then(data => {
+                if (Array.isArray(data)) {
+                    setWetlands(data);
+                }
+            })
             .catch(console.error);
 
         // Check CDSE credentials status (Dual Mode: Institutional vs BYOC)
-        const API = getApiUrl();
         axios.get(`${API}/credentials-status`)
             .then(async r => {
                 if (r.data.server_configured) {
@@ -731,10 +213,12 @@ export default function Dashboard() {
                     setIsInstitutionalServer(false);
                 }
 
-                // Try auto-restoring credentials from localStorage
+                // Try auto-restoring credentials from sessionStorage (migrating any legacy localStorage entry)
                 try {
-                    const saved = localStorage.getItem('cdse_credentials');
+                    const saved = sessionStorage.getItem('cdse_credentials') || localStorage.getItem('cdse_credentials');
                     if (saved) {
+                        sessionStorage.setItem('cdse_credentials', saved);
+                        localStorage.removeItem('cdse_credentials');
                         const parsed = JSON.parse(saved);
                         if (parsed.authMode) setCdseAuthMode(parsed.authMode);
                         if (parsed.username) setCdseUsername(parsed.username);
@@ -744,7 +228,7 @@ export default function Dashboard() {
                         const hasUserCreds = (parsed.username && parsed.password) || (parsed.clientId && parsed.clientSecret);
                         if (hasUserCreds) {
                             setCdseConfigured(true);
-                            setProcessLog(prev => [...prev, '✓  Credenciales CDSE recuperadas desde almacenamiento local']);
+                            setProcessLog(prev => [...prev, '✓  Credenciales CDSE activas en la sesión']);
                         }
                     }
                 } catch {
@@ -752,10 +236,12 @@ export default function Dashboard() {
                 }
             })
             .catch(() => {
-                // Fallback to local storage credentials if backend is offline/sleeping
+                // Fallback to sessionStorage credentials if backend is offline/sleeping
                 try {
-                    const saved = localStorage.getItem('cdse_credentials');
+                    const saved = sessionStorage.getItem('cdse_credentials') || localStorage.getItem('cdse_credentials');
                     if (saved) {
+                        sessionStorage.setItem('cdse_credentials', saved);
+                        localStorage.removeItem('cdse_credentials');
                         const parsed = JSON.parse(saved);
                         if (parsed.authMode) setCdseAuthMode(parsed.authMode);
                         if (parsed.username) setCdseUsername(parsed.username);
@@ -794,23 +280,23 @@ export default function Dashboard() {
         return counts;
     }, [wetlands, getCleanRegion]);
 
-    // Filter wetlands by search and region
+    // Filter wetlands by search and region (debounced/deferred for 60fps instant UI)
     useEffect(() => {
         let results = wetlands;
         if (selectedRegion) {
             results = results.filter(w => getCleanRegion(w.region) === selectedRegion);
         }
-        if (searchQuery.trim().length > 0) {
-            const query = searchQuery.toLowerCase().trim();
+        if (deferredSearchQuery.trim().length > 0) {
+            const query = deferredSearchQuery.toLowerCase().trim();
             results = results.filter(w =>
                 w.name.toLowerCase().includes(query) ||
                 (w.code && String(w.code).toLowerCase().includes(query)) ||
                 (w.region && getCleanRegion(w.region).toLowerCase().includes(query))
             );
         }
-        // Limit results to 150 items for smooth DOM rendering
-        setFilteredWetlands(results.slice(0, 150));
-    }, [searchQuery, selectedRegion, wetlands, getCleanRegion]);
+        // Limit results to 60 items for instantaneous DOM rendering (<5ms)
+        setFilteredWetlands(results.slice(0, 60));
+    }, [deferredSearchQuery, selectedRegion, wetlands, getCleanRegion]);
 
     // Group filtered results by Chilean region
     const groupedWetlands = React.useMemo(() => {
@@ -829,6 +315,25 @@ export default function Dashboard() {
         setSearchQuery(wetland.name);
         setShowSuggestions(false); // Auto-close suggestions
 
+        if (!wetland.geometry) {
+            const key = wetland.name || wetland.code;
+            if (key) {
+                axios.get(`${getApiUrl()}/api/wetland/${encodeURIComponent(key)}/geometry`)
+                    .then(res => {
+                        const geom = res.data?.geometry;
+                        if (geom) {
+                            wetland.geometry = geom;
+                            setSelectedWetland((prev: any) =>
+                                prev && (prev.id === wetland.id || prev.name === wetland.name)
+                                    ? { ...prev, geometry: geom }
+                                    : prev
+                            );
+                        }
+                    })
+                    .catch(() => {});
+            }
+        }
+
         if (wetland.bbox) {
             const [minX, minY, maxX, maxY] = wetland.bbox;
             const optimalZoom = getOptimalZoom([minX, minY, maxX, maxY]);
@@ -838,24 +343,37 @@ export default function Dashboard() {
                 zoom: optimalZoom
             });
         }
-    };
 
-    const saveSettings = (e: React.FormEvent) => {
-        e.preventDefault();
+        // Instant reload: si este humedal ya tiene análisis para este rango, cargarlo al instante (<10ms)
+        const cacheKey = `${wetland.name}_${startDate}_${endDate}`;
+        if (localAnalysisCache.current[cacheKey]) {
+            const cachedData = localAnalysisCache.current[cacheKey];
+            setResults(cachedData);
+            setMergedData(resampleToMonthly(mergeTimeSeries(cachedData)));
+            setProcessLog(prev => [
+                ...prev,
+                `⚡ Datos satelitales cargados al instante (<10ms) para ${wetland.name}`
+            ]);
+        }
     };
-
-    const handleLogin = () => { };
 
     const handleDisconnect = async () => {
         try {
+            sessionStorage.removeItem('cdse_credentials');
             localStorage.removeItem('cdse_credentials');
             const API = getApiUrl();
-            await axios.post(`${API}/clear-credentials`).catch(() => {});
+            await axios.post(`${API}/clear-credentials`, {
+                username: cdseUsername,
+                password: cdsePassword,
+                client_id: cdseClientId,
+                client_secret: cdseClientSecret
+            }).catch(() => {});
         } catch {}
         setCdseUsername('');
         setCdsePassword('');
         setCdseClientId('');
         setCdseClientSecret('');
+        setCdseToken('');
         if (!isInstitutionalServer) {
             setCdseConfigured(false);
         }
@@ -907,15 +425,19 @@ export default function Dashboard() {
             const payload = isPass
                 ? { username: cdseUsername, password: cdsePassword }
                 : { client_id: cdseClientId, client_secret: cdseClientSecret };
-            await axios.post(`${API}/set-credentials`, payload);
+            const setRes = await axios.post(`${API}/set-credentials`, payload);
+            if (setRes.data?.token) {
+                setCdseToken(setRes.data.token);
+            }
             try {
-                localStorage.setItem('cdse_credentials', JSON.stringify({
+                sessionStorage.setItem('cdse_credentials', JSON.stringify({
                     authMode: cdseAuthMode,
                     username: cdseUsername,
                     password: cdsePassword,
                     clientId: cdseClientId,
                     clientSecret: cdseClientSecret
                 }));
+                localStorage.removeItem('cdse_credentials');
             } catch {}
             setCdseConfigured(true);
             setCdseSuccess('Conectado y listo para procesar imágenes Sentinel-2.');
@@ -988,10 +510,10 @@ export default function Dashboard() {
 
     const handleAnalyze = async () => {
         if (!cdseConfigured) {
-            // Attempt auto-restoring credentials from localStorage before aborting
+            // Attempt auto-restoring credentials from sessionStorage before aborting
             let restored = false;
             try {
-                const saved = localStorage.getItem('cdse_credentials');
+                const saved = sessionStorage.getItem('cdse_credentials') || localStorage.getItem('cdse_credentials');
                 if (saved) {
                     const parsed = JSON.parse(saved);
                     const isPass = parsed.authMode !== 'oauth';
@@ -1003,6 +525,7 @@ export default function Dashboard() {
                             : { client_id: parsed.clientId, client_secret: parsed.clientSecret };
                         const authRes = await axios.post(`${getApiUrl()}/set-credentials`, payload);
                         if (authRes.data?.status === 'ok') {
+                            if (authRes.data?.token) setCdseToken(authRes.data.token);
                             setCdseConfigured(true);
                             restored = true;
                             setProcessLog(prev => [...prev, "✓  Credenciales CDSE autenticadas"]);
@@ -1029,7 +552,7 @@ export default function Dashboard() {
         setResults(null);
         setProcessLog([
             "⚙️  Iniciando análisis multi-espectral...",
-            "☀️  Filtro de nubosidad activo: 0% (Imágenes despejadas / leastCC)"
+            "☀️  Filtro de calidad Sen2Cor SCL activo (Máx. 30% nubes / leastCC)"
         ]);
         setViewYear('end');
 
@@ -1070,15 +593,48 @@ export default function Dashboard() {
             setProcessLog(prev => [...prev, `🔍 Vista encuadrada para visión total (Zoom óptimo: ${optimalZoom})`]);
         }
 
+        const geomBoundsKey = activeBounds ? `_${activeBounds.map(n => n.toFixed(3)).join(',')}` : '';
+        const cacheKey = `${selectedWetland?.name || ('custom' + geomBoundsKey)}_${startDate}_${endDate}`;
+        if (localAnalysisCache.current[cacheKey]) {
+            setProcessLog(prev => [
+                ...prev,
+                "⚡ Cargando análisis instantáneo desde memoria local (<10ms)...",
+                "✓  Datos multiespectrales listos"
+            ]);
+            const cachedData = localAnalysisCache.current[cacheKey];
+            setResults(cachedData);
+            setMergedData(resampleToMonthly(mergeTimeSeries(cachedData)));
+            setLoading(false);
+            if (activeBounds) {
+                const optimalZoom = getOptimalZoom(activeBounds);
+                setViewState({
+                    longitude: centerLon,
+                    latitude: centerLat,
+                    zoom: optimalZoom
+                });
+            }
+            return;
+        }
+
+        // Cancel previous in-flight CDSE analysis request to avoid race condition and wasted PUs
+        if (analysisAbortController.current) {
+            analysisAbortController.current.abort();
+        }
+        const controller = new AbortController();
+        analysisAbortController.current = controller;
+
         const payload = {
             geojson: { type: "Feature", geometry: aoiGeometry },
             startDate,
             endDate,
-            wetlandName: selectedWetland?.name || null
+            wetlandName: selectedWetland?.name || null,
+            region: selectedWetland?.region || null,
         };
+        setSarData(null);
+        setSarError(null);
 
         try {
-            setProcessLog(prev => [...prev, "⚙️  Procesando todos los índices con CDSE..."]);
+            setProcessLog(prev => [...prev, "⚙️  Procesando todos los índices con CDSE (V2 unificada)..."]);
             const headers: Record<string, string> = {};
             if (cdseAuthMode === 'password' && cdseUsername && cdsePassword) {
                 headers['X-CDSE-Username'] = cdseUsername;
@@ -1087,8 +643,11 @@ export default function Dashboard() {
                 headers['X-CDSE-Client-Id'] = cdseClientId;
                 headers['X-CDSE-Client-Secret'] = cdseClientSecret;
             }
-            // Use analyze-all endpoint
-            const res = await axios.post(`${getApiUrl()}/analyze-all`, payload, { headers });
+            // Use analyze-all endpoint with cancellation signal
+            const res = await axios.post(`${getApiUrl()}/analyze-all`, payload, { 
+                headers, 
+                signal: controller.signal 
+            });
 
             if (res.data.status === 'success') {
                 const data = res.data.data;
@@ -1106,6 +665,29 @@ export default function Dashboard() {
                     return;
                 }
 
+                // Cache data in local memory and sessionStorage for instant zero-lag reload (<10ms)
+                localAnalysisCache.current[cacheKey] = data;
+                if (typeof window !== 'undefined') {
+                    try {
+                        sessionStorage.setItem('wetland_v2_analysis_cache', JSON.stringify(localAnalysisCache.current));
+                    } catch {}
+                }
+
+                // PU Quota Optimization: Preload ONLY the active view overlays (prevents burning 7 extra PUs for start_year until requested)
+                if (typeof window !== 'undefined') {
+                    const activeUrls = new Set<string>();
+                    Object.values(data).forEach((modeRes: any) => {
+                        if (modeRes?.maps?.overlay?.metric_url) {
+                            activeUrls.add(resolveBackendUrl(modeRes.maps.overlay.metric_url));
+                        }
+                    });
+                    activeUrls.forEach(url => {
+                        fetch(url, {
+                            headers: cdseToken ? { Authorization: `Bearer ${cdseToken}` } : {}
+                        }).catch(() => {});
+                    });
+                }
+
                 setResults(data);
                 setMergedData(resampleToMonthly(mergeTimeSeries(data)));
                 setProcessLog(prev => [...prev, "✓  Análisis finalizado exitosamente"]);
@@ -1121,6 +703,10 @@ export default function Dashboard() {
                 }
             }
         } catch (err: any) {
+            if (axios.isCancel(err) || err.name === 'CanceledError' || err.code === 'ERR_CANCELED') {
+                console.log("Petición de análisis anterior cancelada");
+                return;
+            }
             console.error("Analysis error:", err);
             const status = err.response?.status;
             const detail = err.response?.data?.detail || err.message || "Error desconocido";
@@ -1133,10 +719,41 @@ export default function Dashboard() {
             }
             setProcessLog(prev => [...prev, `✗  ERR: ${detail.substring(0, 35)}...`]);
         } finally {
-            setLoading(false);
+            if (analysisAbortController.current === controller) {
+                setLoading(false);
+            }
         }
     };
 
+
+    const handleAnalyzeSar = async () => {
+        if (!activeGeometry) return;
+        setSarLoading(true);
+        setSarError(null);
+        try {
+            const headers: Record<string, string> = {};
+            if (cdseToken) headers['Authorization'] = `Bearer ${cdseToken}`;
+            else if (cdseAuthMode === 'password' && cdseUsername && cdsePassword) {
+                headers['X-CDSE-Username'] = cdseUsername;
+                headers['X-CDSE-Password'] = cdsePassword;
+            } else if (cdseAuthMode === 'oauth' && cdseClientId && cdseClientSecret) {
+                headers['X-CDSE-Client-Id'] = cdseClientId;
+                headers['X-CDSE-Client-Secret'] = cdseClientSecret;
+            }
+            const res = await axios.post(`${getApiUrl()}/api/analyze-sar`, {
+                geojson: { type: "Feature", geometry: activeGeometry },
+                startDate,
+                endDate,
+                wetlandName: selectedWetland?.name || null,
+                region: selectedWetland?.region || null,
+            }, { headers });
+            setSarData(res.data);
+        } catch (err: any) {
+            setSarError(err?.response?.data?.detail || 'No se pudo completar el análisis radar Sentinel-1');
+        } finally {
+            setSarLoading(false);
+        }
+    };
 
     const handleDownloadReport = async () => {
         const hasArea = areaSource === 'wetland' ? !!selectedWetland : !!customArea;
@@ -1146,10 +763,10 @@ export default function Dashboard() {
         }
 
         try {
-            setGeneratingReport(true); // Show report generation indicator
-            setProcessLog(prev => [...prev, "📄 Generando reporte (esto puede tardar unos segundos)..."]);
+            setGeneratingReport(true);
+            setProcessLog(prev => [...prev, "📄 Generando informe Word (.docx)..."]);
 
-            const areaName = selectedWetland?.name || customAreaName || 'Área Personalizada';
+            const areaName = selectedWetland?.name || customAreaName || 'Area_Personalizada';
             const bbox = (areaSource === 'wetland' && selectedWetland?.bbox)
                 ? selectedWetland.bbox
                 : (customArea ? getBoundsFromGeometry(customArea) : [-70.8, -33.4, -70.7, -33.3]);
@@ -1184,21 +801,50 @@ export default function Dashboard() {
                 responseType: 'blob'
             });
 
-            // Download file
-            const url = window.URL.createObjectURL(new Blob([res.data]));
+            // If the server returned an error wrapped in a blob, detect and parse it
+            if (res.data?.type === 'application/json' || (res.data instanceof Blob && res.data.type.includes('json'))) {
+                const text = await res.data.text();
+                let errMsg = 'Error al generar el informe';
+                try {
+                    const parsed = JSON.parse(text);
+                    if (parsed.detail) errMsg = parsed.detail;
+                } catch { }
+                throw new Error(errMsg);
+            }
+
+            // Create explicit DOCX typed blob so Windows and Word recognize the file immediately
+            const docxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+            const blob = new Blob([res.data], { type: docxMime });
+
+            // Generate clean, safe filename free of path separators, accents, and illegal characters
+            const cleanName = areaName
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/[^a-zA-Z0-9_\-\.]/g, '_')
+                .replace(/_+/g, '_')
+                .replace(/^_+|_+$/g, '');
+
+            const safeFilename = `Reporte_Comparativo_${cleanName || 'Humedal'}_${startDate}_a_${endDate}.docx`;
+
+            // Download file via invisible link
+            const url = window.URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = url;
-            link.setAttribute('download', `Reporte_Comparativo_${areaName.replace(/\s+/g, '_')}_${startDate}_a_${endDate}.docx`);
+            link.download = safeFilename;
             document.body.appendChild(link);
             link.click();
-            link.remove();
-            window.URL.revokeObjectURL(url);
+            
+            setTimeout(() => {
+                link.remove();
+                window.URL.revokeObjectURL(url);
+            }, 1000);
 
-            setProcessLog(prev => [...prev, "✓  Reporte descargado exitosamente"]);
-        } catch (err) {
+            setProcessLog(prev => [...prev, `✓  Informe descargado: ${safeFilename}`]);
+        } catch (err: any) {
             console.error(err);
-            alert('Error al generar el reporte. Revisa la consola para más detalles.');
-            setProcessLog(prev => [...prev, "✗  Error al generar reporte"]);
+            const msg = err?.message || 'Error al generar el informe. Revisa la consola para más detalles.';
+            alert(msg);
+            setProcessLog(prev => [...prev, `✗  Error: ${msg.substring(0, 40)}`]);
         } finally {
             setGeneratingReport(false);
         }
@@ -1506,28 +1152,6 @@ export default function Dashboard() {
                     )}
                 </GlassPanel>
 
-                {/* OLD SEARCH (removed, now inside tab) */}
-                <div className="relative z-50 hidden">
-                    <div className="relative">
-                        <Search className="absolute left-3 top-2.5 w-4 h-4 text-gray-500" />
-                        <input
-                            type="text"
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            placeholder="Buscar humedal..."
-                            className="w-full bg-gray-900 border border-white/10 rounded-xl py-2 pl-10 pr-4 text-xs focus:ring-1 focus:ring-blue-500 outline-none"
-                        />
-                    </div>
-                    {showSuggestions && filteredWetlands.length > 0 && (
-                        <div className="absolute top-full left-0 right-0 mt-2 bg-black border border-white/10 rounded-xl max-h-40 overflow-y-auto z-50">
-                            {filteredWetlands.map(w => (
-                                <button key={w.id} onClick={() => selectWetland(w)} className="w-full text-left px-4 py-2 text-[10px] hover:bg-white/10 border-b border-white/5 text-gray-300">
-                                    {w.name}
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
 
                 {/* 2.5 WETLAND PROFILE */}
                 {selectedWetland && (
@@ -1584,7 +1208,7 @@ export default function Dashboard() {
                                 </span>
                             </div>
                             <div className="flex items-center justify-between text-[10px]">
-                                <span className="text-gray-400">Sentinel-1 SAR</span>
+                                <span className="text-gray-400">Copernicus CDSE API</span>
                                 <span className="text-green-400 font-mono bg-green-900/30 px-1.5 py-0.5 rounded flex items-center gap-1">
                                     <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" /> ONLINE
                                 </span>
@@ -1658,9 +1282,143 @@ export default function Dashboard() {
                     </GlassPanel>
                 )}
 
+                {/* 2.8 ESTADO SITUACIONAL Y SALUD ECOSISTÉMICA CONSOLIDADA (IMCE) */}
+                {consolidatedStatus && (
+                    <GlassPanel className="p-3.5 flex flex-col gap-2.5 border-emerald-500/20 bg-gradient-to-b from-emerald-950/20 via-black/40 to-black/60 shadow-[0_0_20px_rgba(16,185,129,0.1)]">
+                        <div className="flex items-center justify-between">
+                            <label className="text-[10px] text-gray-300 font-bold uppercase tracking-wider flex items-center gap-1.5">
+                                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                                <span>Salud Ecosistémica (IMCE)</span>
+                            </label>
+                            <span 
+                                className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border"
+                                style={{
+                                    backgroundColor: `${consolidatedStatus.health_color}20`,
+                                    borderColor: `${consolidatedStatus.health_color}50`,
+                                    color: consolidatedStatus.health_color
+                                }}
+                            >
+                                {consolidatedStatus.health_badge}
+                            </span>
+                        </div>
+
+                        {/* IMCE Score & Diagnosis Title */}
+                        <div className="flex items-baseline justify-between bg-white/5 p-2 rounded-lg">
+                            <div>
+                                <div className="text-[8.5px] text-gray-400 uppercase font-mono">Índice IMCE (AHP)</div>
+                                <div className="text-xl font-mono font-bold text-white flex items-baseline gap-1">
+                                    <span>{consolidatedStatus.imce_score ?? consolidatedStatus.weci_score ?? '—'}</span>
+                                    {consolidatedStatus.imce_score != null && (
+                                        <span className="text-[10px] text-gray-400 font-normal">/ 100</span>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="text-right max-w-[130px]">
+                                <div className="text-[8.5px] text-gray-400 uppercase font-mono">Diagnóstico</div>
+                                <div className="text-[10px] font-semibold text-emerald-300 leading-tight">
+                                    {consolidatedStatus.diagnosis.title}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Dimensional Progress Bars */}
+                        <div className="space-y-1.5 bg-black/40 p-2 rounded-lg border border-white/5 text-[9px] font-mono">
+                            <div className="flex items-center justify-between text-gray-300">
+                                <span className="flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                                    <span>Hidrología ({consolidatedStatus.dimensions.hydrology.weight}%)</span>
+                                </span>
+                                <span className="text-blue-400 font-bold">
+                                    {consolidatedStatus.dimensions.hydrology.score != null ? `${consolidatedStatus.dimensions.hydrology.score.toFixed(0)}%` : 'N/D'}
+                                </span>
+                            </div>
+                            <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+                                <div className="bg-blue-500 h-full rounded-full transition-all duration-500" style={{ width: `${consolidatedStatus.dimensions.hydrology.score ?? 0}%` }} />
+                            </div>
+
+                            <div className="flex items-center justify-between text-gray-300 pt-0.5">
+                                <span className="flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                                    <span>Vegetación ({consolidatedStatus.dimensions.vegetation.weight}%)</span>
+                                </span>
+                                <span className="text-green-400 font-bold">
+                                    {consolidatedStatus.dimensions.vegetation.score != null ? `${consolidatedStatus.dimensions.vegetation.score.toFixed(0)}%` : 'N/D'}
+                                </span>
+                            </div>
+                            <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+                                <div className="bg-green-500 h-full rounded-full transition-all duration-500" style={{ width: `${consolidatedStatus.dimensions.vegetation.score ?? 0}%` }} />
+                            </div>
+
+                            <div className="flex items-center justify-between text-gray-300 pt-0.5">
+                                <span className="flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                                    <span>Calidad Agua ({consolidatedStatus.dimensions.water_quality.weight}%)</span>
+                                </span>
+                                <span className="text-cyan-400 font-bold">
+                                    {consolidatedStatus.dimensions.water_quality.weight === 0 ? 'N/A' : (consolidatedStatus.dimensions.water_quality.score != null ? `${consolidatedStatus.dimensions.water_quality.score.toFixed(0)}%` : 'N/D')}
+                                </span>
+                            </div>
+                            <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+                                <div className="bg-cyan-500 h-full rounded-full transition-all duration-500" style={{ width: `${consolidatedStatus.dimensions.water_quality.score ?? 0}%` }} />
+                            </div>
+                        </div>
+
+
+                        {/* Action to open full audit modal */}
+                        <button
+                            type="button"
+                            onClick={() => setShowDiagnosisModal(true)}
+                            className="w-full py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/30 text-[9.5px] font-semibold text-emerald-300 hover:text-white transition-all text-center flex items-center justify-center gap-1"
+                        >
+                            <span>Dictamen Completo Ley 21.202</span>
+                            <span>→</span>
+                        </button>
+                    </GlassPanel>
+                )}
+
                 {/* 3. CONTROL PANEL */}
                 <GlassPanel id="control-panel" className="p-4 flex flex-col gap-3 mt-auto">
                     <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Control de Misión</label>
+                    {/* QUICK HORIZON PRESETS (<1s) */}
+                    <div className="flex items-center justify-between gap-1">
+                        {[
+                            { label: '1A', yrs: 1 },
+                            { label: '3A', yrs: 3 },
+                            { label: '5A', yrs: 5 },
+                            { label: '10A', yrs: 10 }
+                        ].map(preset => (
+                            <button
+                                key={preset.label}
+                                type="button"
+                                onClick={() => {
+                                    const endDt = new Date(endDate || '2026-01-22');
+                                    const startDt = new Date(endDt);
+                                    startDt.setFullYear(startDt.getFullYear() - preset.yrs);
+                                    const newStart = startDt.toISOString().split('T')[0];
+                                    setStartDate(newStart);
+
+                                    const bboxKey = (areaSource === 'wetland' && selectedWetland?.bbox)
+                                        ? `_${selectedWetland.bbox.map(n => n.toFixed(3)).join(',')}`
+                                        : (customArea ? `_${getBoundsFromGeometry(customArea)?.map(n => n.toFixed(3)).join(',') || ''}` : '');
+                                    const key = `${selectedWetland?.name || ('custom' + bboxKey)}_${newStart}_${endDate}`;
+                                    if (localAnalysisCache.current[key]) {
+                                        const cached = localAnalysisCache.current[key];
+                                        setResults(cached);
+                                        setMergedData(resampleToMonthly(mergeTimeSeries(cached)));
+                                        setProcessLog(prev => [
+                                            ...prev,
+                                            `⚡ Horizonte ${preset.label} cargado al instante (<10ms)`
+                                        ]);
+                                    }
+                                }}
+                                className="flex-1 py-1 rounded bg-white/5 hover:bg-blue-600/30 border border-white/10 hover:border-blue-500/40 text-[9px] font-mono text-gray-300 hover:text-white transition-all text-center"
+                                title={`Rango de ${preset.yrs} ${preset.yrs === 1 ? 'año' : 'años'}`}
+                            >
+                                {preset.label}
+                            </button>
+                        ))}
+                    </div>
+
                     <div className="grid grid-cols-2 gap-2">
                         <div className="space-y-1">
                             <label className="text-[10px] text-gray-400 font-medium">Inicio</label>
@@ -1687,24 +1445,24 @@ export default function Dashboard() {
                         Sentinel-2 MSI disponible desde julio 2015
                     </div>
 
-                    {/* FILTRO NUBOSIDAD INDICATOR */}
-                    <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-sky-500/10 border border-sky-500/20 text-[9px] font-mono text-sky-300">
+                    {/* FILTRO NUBOSIDAD INDICATOR (V2 CALIBRATED) */}
+                    <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-[9px] font-mono text-emerald-300">
                         <span className="flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-pulse" />
-                            Filtro Nubosidad:
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            Filtro Nubes (SCL):
                         </span>
-                        <span className="font-bold text-white bg-sky-500/25 px-1.5 py-0.5 rounded border border-sky-400/30 text-[8px]">
-                            0% (DESPEJADO)
+                        <span className="font-bold text-white bg-emerald-500/25 px-1.5 py-0.5 rounded border border-emerald-400/30 text-[8px]">
+                            CALIBRADO (&le;30% + SCL)
                         </span>
                     </div>
 
                     <button
                         type="button"
                         onClick={handleAnalyze}
-                        disabled={loading || generatingReport || !selectedWetland}
+                        disabled={loading || generatingReport || !(areaSource === 'wetland' ? selectedWetland : customArea)}
                         className={`w-full py-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all
-                            ${loading || !selectedWetland ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]'}`}
-                        title={!selectedWetland ? 'Selecciona un humedal primero' : ''}
+                            ${loading || !(areaSource === 'wetland' ? selectedWetland : customArea) ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]'}`}
+                        title={!(areaSource === 'wetland' ? selectedWetland : customArea) ? 'Selecciona un humedal o sube un área personalizada primero' : ''}
                     >
                         {loading ? (
                             <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> PROCESANDO ANÁLISIS...</>
@@ -1717,19 +1475,17 @@ export default function Dashboard() {
                     <button
                         type="button"
                         onClick={handleDownloadReport}
-                        disabled={generatingReport || loading || !results || !selectedWetland}
+                        disabled={generatingReport || loading || !results || !(areaSource === 'wetland' ? selectedWetland : customArea)}
                         className={`w-full py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all
-                            ${generatingReport || !results || !selectedWetland ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'}`}
-                        title={!results ? 'Ejecuta un análisis primero' : 'Descargar reporte Word'}
+                            ${generatingReport || !results || !(areaSource === 'wetland' ? selectedWetland : customArea) ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]'}`}
+                        title={!results ? 'Ejecuta un análisis primero' : 'Descargar informe Word (.docx)'}
                     >
                         {generatingReport ? (
-                            <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> GENERANDO REPORTE...</>
+                            <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> GENERANDO INFORME WORD...</>
                         ) : (
                             <>
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                </svg>
-                                DESCARGAR REPORTE
+                                <FileText className="w-4 h-4 text-blue-300" />
+                                DESCARGAR INFORME (.DOCX)
                             </>
                         )}
                     </button>
@@ -1764,6 +1520,23 @@ export default function Dashboard() {
                             <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
                             {selectedWetland ? selectedWetland.name : customArea ? (customAreaName || 'Área Personalizada') : 'Ninguno seleccionado'}
                         </span>
+                        {/* IMCE STATUS PILL */}
+                        {consolidatedStatus && (
+                            <button
+                                type="button"
+                                onClick={() => setShowDiagnosisModal(true)}
+                                className="text-xs font-semibold px-2.5 py-0.5 rounded-lg flex items-center gap-1.5 border backdrop-blur-md cursor-pointer hover:scale-[1.02] transition-all shadow-sm"
+                                style={{
+                                    backgroundColor: `${consolidatedStatus.health_color}18`,
+                                    borderColor: `${consolidatedStatus.health_color}50`,
+                                    color: consolidatedStatus.health_color
+                                }}
+                                title="Ver Dictamen y Diagnóstico Ecosistémico Consolidado IMCE (Ley 21.202)"
+                            >
+                                <ShieldCheck className="w-3.5 h-3.5" />
+                                <span>IMCE: {consolidatedStatus.imce_score ?? consolidatedStatus.weci_score ?? 'N/D'} · {consolidatedStatus.health_badge}</span>
+                            </button>
+                        )}
                         {/* CONTROLES ZOOM MANUAL */}
                         <div className="flex items-center bg-black/60 border border-white/10 rounded-lg p-0.5" title="Ajuste fino de acercamiento">
                             <button
@@ -1870,10 +1643,11 @@ export default function Dashboard() {
                             res={results?.[mode.id]}
                             legend={LEGENDS[mode.id]}
                             viewState={viewState}
-                            onMove={evt => setViewState(evt.viewState)}
+                            onMove={handleMapMove}
                             viewYear={viewYear}
                             boundaryGeometry={activeGeometry}
                             mapMode={mapMode}
+                            cdseToken={cdseToken}
                         />
                     ))}
                 </div>
@@ -2022,6 +1796,331 @@ export default function Dashboard() {
                         </ResponsiveContainer>
                     </div>
                 </div>
+
+                {/* 5. MODAL: DICTAMEN CIENTÍFICO Y DIAGNÓSTICO ECOSISTÉMICO CONSOLIDADO (LEY 21.202) */}
+                {showDiagnosisModal && consolidatedStatus && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+                        <div className="bg-gray-900/95 border border-white/15 rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto shadow-2xl flex flex-col p-6 gap-5">
+                            {/* Modal Header */}
+                            <div className="flex items-center justify-between border-b border-white/10 pb-4">
+                                <div className="flex items-center gap-2.5">
+                                    <div className="p-2 rounded-xl bg-blue-500/20 text-blue-400 border border-blue-500/30">
+                                        <ShieldCheck className="w-5 h-5" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-base font-bold text-white flex items-center gap-2">
+                                            <span>Diagnóstico Situacional y Salud Ecosistémica Consolidada</span>
+                                            <span 
+                                                className="text-[10px] font-mono font-bold px-2 py-0.5 rounded border"
+                                                style={{
+                                                    backgroundColor: `${consolidatedStatus.health_color}20`,
+                                                    borderColor: `${consolidatedStatus.health_color}50`,
+                                                    color: consolidatedStatus.health_color
+                                                }}
+                                            >
+                                                {consolidatedStatus.health_badge}
+                                            </span>
+                                        </h2>
+                                        <p className="text-xs text-gray-400">
+                                            Humedal: <span className="text-white font-semibold">{selectedWetland?.name || customAreaName || 'Área de Estudio'}</span> · Período: {startDate} → {endDate}
+                                        </p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setShowDiagnosisModal(false)}
+                                    className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+                                    title="Cerrar modal"
+                                >
+                                    <X className="w-5 h-5" />
+                                </button>
+                            </div>
+
+                            {/* IMCE Overview Card */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="bg-black/40 border border-white/10 rounded-xl p-4 flex flex-col justify-between">
+                                    <span className="text-[10px] text-gray-400 uppercase font-mono font-bold">Índice IMCE Consolidado</span>
+                                    <div className="flex items-baseline gap-2 my-2">
+                                        <span className="text-4xl font-bold font-mono text-white">{consolidatedStatus.imce_score ?? consolidatedStatus.weci_score ?? '—'}</span>
+                                        {consolidatedStatus.imce_score != null && (
+                                            <span className="text-xs text-gray-400 font-mono">/ 100</span>
+                                        )}
+                                    </div>
+                                    <div className="text-[11px] font-semibold" style={{ color: consolidatedStatus.health_color }}>
+                                        {consolidatedStatus.health_label}
+                                    </div>
+                                    <div className="text-[9px] text-gray-500 font-mono mt-1">
+                                        Modelo AHP · Ramsar Res. IX.1
+                                    </div>
+                                </div>
+
+                                <div className="md:col-span-2 bg-black/40 border border-white/10 rounded-xl p-4 flex flex-col justify-between">
+                                    <div>
+                                        <span className="text-[10px] text-gray-400 uppercase font-mono font-bold">Diagnóstico Dinámico (Matriz de Estado-Transición)</span>
+                                        <h3 className="text-sm font-bold text-white mt-1">{consolidatedStatus.diagnosis.title}</h3>
+                                        <p className="text-xs text-gray-300 mt-1 leading-relaxed">{consolidatedStatus.diagnosis.description}</p>
+                                    </div>
+                                    <div className="mt-3 pt-2.5 border-t border-white/10 flex items-center justify-between text-[11px]">
+                                        <span className="text-gray-400 font-medium">Dictamen Ley 21.202 / SMA:</span>
+                                        <span className="text-emerald-400 font-semibold">{consolidatedStatus.diagnosis.regulatory_verdict}</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* 3 Functional Dimensions */}
+                            <div className="space-y-2">
+                                <h3 className="text-xs font-bold uppercase tracking-wider text-gray-400 flex items-center gap-1.5">
+                                    <Activity className="w-3.5 h-3.5 text-blue-400" /> Desglose por Dimensiones Ecológicas
+                                </h3>
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    {/* Hidrología */}
+                                    <div className="bg-black/30 border border-blue-500/20 rounded-xl p-3.5 space-y-2">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs font-bold text-blue-400 flex items-center gap-1.5">
+                                                <Droplets className="w-3.5 h-3.5" /> Hidrología y Saturación
+                                            </span>
+                                            <span className="text-xs font-mono font-bold text-white">
+                                                {consolidatedStatus.dimensions.hydrology.score != null ? `${consolidatedStatus.dimensions.hydrology.score.toFixed(0)}%` : 'N/D'}
+                                            </span>
+                                        </div>
+                                        <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
+                                            <div className="bg-blue-500 h-full rounded-full" style={{ width: `${consolidatedStatus.dimensions.hydrology.score ?? 0}%` }} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-400">
+                                            Indicadores: <span className="text-gray-200 font-mono">MNDWI, WRI</span> · Peso: 35%
+                                        </div>
+                                    </div>
+
+                                    {/* Vegetación */}
+                                    <div className="bg-black/30 border border-green-500/20 rounded-xl p-3.5 space-y-2">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs font-bold text-green-400 flex items-center gap-1.5">
+                                                <Activity className="w-3.5 h-3.5" /> Vigor y Cobertura Vegetal
+                                            </span>
+                                            <span className="text-xs font-mono font-bold text-white">
+                                                {consolidatedStatus.dimensions.vegetation.score != null ? `${consolidatedStatus.dimensions.vegetation.score.toFixed(0)}%` : 'N/D'}
+                                            </span>
+                                        </div>
+                                        <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
+                                            <div className="bg-green-500 h-full rounded-full" style={{ width: `${consolidatedStatus.dimensions.vegetation.score ?? 0}%` }} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-400">
+                                            Indicadores: <span className="text-gray-200 font-mono">NDRE, SAVI</span> · Peso: 35%
+                                        </div>
+                                    </div>
+
+                                    {/* Calidad de Agua */}
+                                    <div className="bg-black/30 border border-cyan-500/20 rounded-xl p-3.5 space-y-2">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-xs font-bold text-cyan-400 flex items-center gap-1.5">
+                                                <AlertCircle className="w-3.5 h-3.5" /> Integridad de Calidad
+                                            </span>
+                                            <span className="text-xs font-mono font-bold text-white">
+                                                {consolidatedStatus.dimensions.water_quality.weight === 0 ? 'N/A' : (consolidatedStatus.dimensions.water_quality.score != null ? `${consolidatedStatus.dimensions.water_quality.score.toFixed(0)}%` : 'N/D')}
+                                            </span>
+                                        </div>
+                                        <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
+                                            <div className="bg-cyan-500 h-full rounded-full" style={{ width: `${consolidatedStatus.dimensions.water_quality.score ?? 0}%` }} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-400">
+                                            Indicadores: <span className="text-gray-200 font-mono">NDCI, FAI</span> · Peso: 30%
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Table of Status by Index */}
+                            <div className="space-y-2">
+                                <h3 className="text-xs font-bold uppercase tracking-wider text-gray-400 flex items-center gap-1.5">
+                                    <Layers className="w-3.5 h-3.5 text-purple-400" /> Matriz Comparativa de Estados por Índice Espectral
+                                </h3>
+                                <div className="border border-white/10 rounded-xl overflow-hidden bg-black/40">
+                                    <table className="w-full text-left border-collapse text-xs">
+                                        <thead>
+                                            <tr className="bg-white/5 border-b border-white/10 text-gray-400 font-mono text-[10px] uppercase">
+                                                <th className="py-2.5 px-3">Índice</th>
+                                                <th className="py-2.5 px-3">Inicial ({startDate.substring(0, 4)})</th>
+                                                <th className="py-2.5 px-3">Final ({endDate.substring(0, 4)})</th>
+                                                <th className="py-2.5 px-3">Variación (Δ)</th>
+                                                <th className="py-2.5 px-3">Estado Situacional Declarado</th>
+                                                <th className="py-2.5 px-3">Umbral / Referencia</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-white/5 font-mono">
+                                            {[
+                                                { id: 'Hydrology', name: 'MNDWI', full: 'Hidrología' },
+                                                { id: 'Vegetation', name: 'NDRE', full: 'Vegetación RedEdge' },
+                                                { id: 'WaterQuality', name: 'NDCI', full: 'Calidad de Agua' },
+                                                { id: 'SoilVegetation', name: 'SAVI', full: 'Vegetación Ajustada' },
+                                                { id: 'AlgaeBloom', name: 'FAI', full: 'Algas Flotantes' },
+                                                { id: 'WaterRatio', name: 'WRI', full: 'Ratio Agua-Tierra' }
+                                            ].map(idx => {
+                                                const mRes = results?.[idx.id];
+                                                const iVal = mRes?.stats?.initial ?? mRes?.stats?.current;
+                                                const fVal = mRes?.stats?.current;
+                                                const delta = mRes?.stats?.trend_delta ?? mRes?.stats?.trend;
+                                                const status = mRes?.situational_status || {
+                                                    status_label: 'Sin Datos',
+                                                    status_level: 'unknown',
+                                                    status_color: '#94a3b8',
+                                                    threshold: 'N/A',
+                                                    scientific_basis: 'Sin observaciones',
+                                                    description: 'Sin datos suficientes en el período',
+                                                };
+                                                return (
+                                                    <tr key={idx.id} className="hover:bg-white/5 transition-colors">
+                                                        <td className="py-2.5 px-3 font-bold text-white">
+                                                            <span>{idx.name}</span>
+                                                            <span className="block text-[9px] font-normal text-gray-400">{idx.full}</span>
+                                                        </td>
+                                                        <td className="py-2.5 px-3 text-gray-300">
+                                                            {iVal != null ? iVal.toFixed(3) : '---'}
+                                                        </td>
+                                                        <td className="py-2.5 px-3 font-bold text-white">
+                                                            {fVal != null ? fVal.toFixed(3) : '---'}
+                                                        </td>
+                                                        <td className="py-2.5 px-3">
+                                                            {delta != null ? (
+                                                                <span className={delta >= 0 ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
+                                                                    {delta >= 0 ? '+' : ''}{delta.toFixed(3)}
+                                                                </span>
+                                                            ) : '---'}
+                                                        </td>
+                                                        <td className="py-2.5 px-3">
+                                                            <span
+                                                                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold border"
+                                                                style={{
+                                                                    backgroundColor: `${status.status_color}20`,
+                                                                    borderColor: `${status.status_color}50`,
+                                                                    color: status.status_color
+                                                                }}
+                                                            >
+                                                                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: status.status_color }} />
+                                                                {status.status_label}
+                                                            </span>
+                                                        </td>
+                                                        <td className="py-2.5 px-3 text-[10px] text-gray-400 font-sans">
+                                                            <div className="font-mono text-gray-300">{status.threshold}</div>
+                                                            <div className="text-[9px] text-gray-500">{status.scientific_basis}</div>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* Scientific Protocol and Legal Limitations Box */}
+                            <div className="bg-black/50 border border-blue-500/20 rounded-xl p-3 text-[10px] text-gray-400 space-y-1.5 leading-relaxed">
+                                <div className="font-bold text-gray-300 font-mono flex items-center gap-1.5">
+                                    <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
+                                    <span>Protocolo Científico y Alcances Metodológicos (Ley N° 21.202)</span>
+                                </div>
+                                <p>
+                                    El Índice Multicriterio de Condición Ecológica (IMCE) consolida los 6 estimadores biofísicos de Sentinel-2 MSI (10-20m) mediante Análisis Jerárquico (AHP, Saaty 1980) y funciones continuas no lineales.
+                                    La dimensión de calidad óptica está físicamente condicionada a la presencia de lámina de agua libre detectable (MNDWI ≥ -0.15) para evitar falsos positivos provocados por vegetación terrestre en periodos de estiaje.
+                                    La teledetección acredita de forma continua los criterios de régimen hidrológico y vegetación hidrófita, debiendo complementarse con barrenados de suelo hídrico en terreno para deslindes catastrales definitivos.
+                                </p>
+                            </div>
+
+                            {/* Trazabilidad Técnica y Auditoría + Radar Sentinel-1 */}
+                            <div className="bg-black/40 border border-white/10 rounded-xl p-4 space-y-3">
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                    <h4 className="text-[11px] font-bold uppercase tracking-wider text-cyan-400">
+                                        Trazabilidad Técnica y Evidencia Satelital
+                                    </h4>
+                                    <button
+                                        type="button"
+                                        onClick={handleAnalyzeSar}
+                                        disabled={sarLoading || !activeGeometry}
+                                        className="px-3 py-1 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/35 border border-cyan-500/40 text-cyan-300 text-[10px] font-bold transition-all disabled:opacity-50"
+                                    >
+                                        {sarLoading ? 'Consultando Radar S1...' : 'Radar Sentinel-1 SAR (Anti-Nubes)'}
+                                    </button>
+                                </div>
+                                {(results as any)?.audit_trail && (() => {
+                                    const audit = (results as any).audit_trail;
+                                    return (
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">
+                                        <div className="bg-white/5 rounded-lg p-2">
+                                            <div className="text-gray-500 uppercase">Macrozona</div>
+                                            <div className="text-gray-200 truncate" title={audit.macrozone_label || audit.macrozone}>
+                                                {audit.macrozone || 'centro_mediterraneo'}
+                                            </div>
+                                        </div>
+                                        <div className="bg-white/5 rounded-lg p-2">
+                                            <div className="text-gray-500 uppercase">Superficie</div>
+                                            <div className="text-gray-200">
+                                                {audit.area_ha != null ? `${audit.area_ha} ha` : 'N/D'}
+                                            </div>
+                                        </div>
+                                        <div className="bg-white/5 rounded-lg p-2">
+                                            <div className="text-gray-500 uppercase">Cobertura Sin Nubes</div>
+                                            <div className="text-gray-200">
+                                                {audit.mean_cloud_free_pct != null ? `${audit.mean_cloud_free_pct}%` : 'N/D'}
+                                            </div>
+                                        </div>
+                                        <div className="bg-white/5 rounded-lg p-2">
+                                            <div className="text-gray-500 uppercase">SHA-256 AOI</div>
+                                            <div className="text-gray-200 truncate" title={audit.geometry_sha256}>
+                                                {audit.geometry_sha256 ? `${audit.geometry_sha256.slice(0, 14)}…` : 'N/D'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    );
+                                })()}
+                                {sarError && (
+                                    <div className="text-[10px] text-red-400 font-mono">{sarError}</div>
+                                )}
+                                {sarData && (
+                                    <div className="grid grid-cols-3 gap-2 text-[10px] font-mono bg-cyan-950/25 border border-cyan-500/20 rounded-lg p-2.5">
+                                        <div>
+                                            <div className="text-cyan-400/80 uppercase">Observaciones S1</div>
+                                            <div className="text-white font-bold">{sarData.observations} pasadas</div>
+                                        </div>
+                                        <div>
+                                            <div className="text-cyan-400/80 uppercase">Lámina Agua Radar (VV &lt; -15dB)</div>
+                                            <div className="text-white font-bold">
+                                                {sarData.summary?.latest_water_pct != null ? `${sarData.summary.latest_water_pct}%` : 'N/D'}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="text-cyan-400/80 uppercase">Backscatter Medio VV</div>
+                                            <div className="text-white font-bold">
+                                                {sarData.summary?.mean_vv_db != null ? `${sarData.summary.mean_vv_db} dB` : 'N/D'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Footer Actions */}
+                            <div className="flex items-center justify-between border-t border-white/10 pt-4">
+                                <div className="text-[10px] text-gray-400 font-mono">
+                                    Base científica: Sentinel-2 MSI L2A (CDSE) · AHP Multicriterio · Marco Ramsar
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={handleDownloadReport}
+                                        disabled={generatingReport}
+                                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition-all flex items-center gap-1.5 shadow-[0_0_15px_rgba(37,99,235,0.3)]"
+                                    >
+                                        <FileText className="w-3.5 h-3.5" />
+                                        <span>Descargar Reporte Word (.docx)</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowDiagnosisModal(false)}
+                                        className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-gray-300 text-xs font-semibold transition-all"
+                                    >
+                                        Cerrar
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
 
             </main>
         </div>

@@ -21,6 +21,9 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next ./.next
 
+RUN adduser -D appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 3000
 
 CMD ["npm", "start"]

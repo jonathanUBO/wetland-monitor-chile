@@ -34,8 +34,12 @@ gee-key.json
 
 # Project Specific
 *.docx
+*.pptx
 *.log
 wetland_analysis.log
+backend/.cache_analysis/
+backend/.cache_overlays/
+frontend/tsconfig.tsbuildinfo
 temp/
 scratch/
 brain/
